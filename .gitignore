@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+models/*
+!models/.keep
+.gitkeep
+!models/.keep
+.cache/
+uv.lock.backup
+*.egg-info/
+.mypy_cache
+.pytest_cache
+.ruff_cache
+tmp
