@@ -29,6 +29,11 @@ _in_flight_state = {"count": 0}
 _in_flight_lock = asyncio.Lock()
 
 
+async def _decrement_in_flight() -> None:
+    async with _in_flight_lock:
+        _in_flight_state["count"] -= 1
+
+
 @asynccontextmanager
 async def limiter() -> AsyncIterator[None]:
     if not _state["accepting"]:
@@ -55,8 +60,11 @@ async def limiter() -> AsyncIterator[None]:
         try:
             yield
         finally:
-            async with _in_flight_lock:
-                _in_flight_state["count"] -= 1
+            try:
+                await asyncio.shield(_decrement_in_flight())
+            except asyncio.CancelledError:
+                # Propagate cancellation after ensuring the counter is updated.
+                raise
     finally:
         if acquired:
             _semaphore.release()
