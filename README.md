@@ -18,6 +18,15 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - For Whisper audio: system `ffmpeg` (or torchaudio-compatible codecs) installed and on PATH
 - Startup will fail hard if any requested model fails to download or load (auto-download is on by default; disable with `AUTO_DOWNLOAD_MODELS=0` if you want prefetch-only).
 
+## TODO / Future Work
+
+- Provide high-performance handlers per model type:
+  - Whisper via faster-whisper/CT2 for lower latency.
+  - Chat via vLLM/TGI/llama.cpp backends while keeping the same `ChatModel` interface.
+  - Embeddings via ONNX/TensorRT (e.g., bge, gemma) to cut CPU/GPU latency.
+- Add optional remote inference handler (HTTP/gRPC) implementing the same protocols for easy swapping.
+- Expand benchmarks to compare reference HF vs. high-performance variants under identical prompts/audio.
+
 ## Quick start
 
 1) Install deps  
