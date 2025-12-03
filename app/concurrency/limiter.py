@@ -25,32 +25,52 @@ QUEUE_TIMEOUT_SEC = float(os.getenv("QUEUE_TIMEOUT_SEC", "2.0"))
 _semaphore: asyncio.Semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 _queue: asyncio.Queue[int] = asyncio.Queue(MAX_QUEUE_SIZE)
 _state = {"accepting": True}
+_in_flight_state = {"count": 0}
+_in_flight_lock = asyncio.Lock()
+
+
+async def _decrement_in_flight() -> None:
+    async with _in_flight_lock:
+        _in_flight_state["count"] -= 1
 
 
 @asynccontextmanager
 async def limiter() -> AsyncIterator[None]:
     if not _state["accepting"]:
         raise ShuttingDownError("Service is shutting down")
+    queued = False
     try:
         _queue.put_nowait(1)
+        queued = True
     except asyncio.QueueFull as exc:  # queue already at capacity
         record_queue_rejection()
         raise QueueFullError("Request queue is full") from exc
 
+    acquired = False
     try:
         try:
             await asyncio.wait_for(_semaphore.acquire(), timeout=QUEUE_TIMEOUT_SEC)
+            acquired = True
         except TimeoutError as exc:  # waited too long
             record_queue_rejection()
             raise QueueTimeoutError("Timed out waiting for worker") from exc
 
+        async with _in_flight_lock:
+            _in_flight_state["count"] += 1
         try:
             yield
         finally:
-            _semaphore.release()
+            try:
+                await asyncio.shield(_decrement_in_flight())
+            except asyncio.CancelledError:
+                # Propagate cancellation after ensuring the counter is updated.
+                raise
     finally:
-        _queue.get_nowait()
-        _queue.task_done()
+        if acquired:
+            _semaphore.release()
+        if queued:
+            _queue.get_nowait()
+            _queue.task_done()
 
 
 def stop_accepting() -> None:
@@ -60,11 +80,14 @@ def stop_accepting() -> None:
 
 async def wait_for_drain(timeout: float = 5.0) -> None:
     """Wait for in-flight work to finish, with a timeout."""
-    deadline = asyncio.get_event_loop().time() + timeout
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     while True:
-        in_flight = _queue.qsize() > 0 or _semaphore._value < MAX_CONCURRENT
-        if not in_flight:
+        async with _in_flight_lock:
+            active = _in_flight_state["count"]
+        queue_backlog = _queue.qsize()
+        if active == 0 and queue_backlog == 0:
             break
-        if asyncio.get_event_loop().time() >= deadline:
+        if loop.time() >= deadline:
             break
         await asyncio.sleep(0.05)
