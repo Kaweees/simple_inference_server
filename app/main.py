@@ -1,6 +1,7 @@
 import importlib.util
 import logging
 import os
+import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,6 +10,7 @@ import torch
 import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from huggingface_hub import snapshot_download
 
 from app import state
 from app.api import router as api_router
@@ -32,6 +34,7 @@ def startup() -> tuple[ModelRegistry, BatchingService]:
 
     # Prefer local ./models; if HF_HOME already set, keep it for fallback use
     os.environ.setdefault("HF_HOME", str(Path.cwd() / "models"))
+    cache_dir = os.environ["HF_HOME"]
 
     config_path = os.getenv("MODEL_CONFIG", "configs/model_config.yaml")
     device_override = os.getenv("MODEL_DEVICE") or None
@@ -41,6 +44,7 @@ def startup() -> tuple[ModelRegistry, BatchingService]:
         raise SystemExit(
             "No models specified. Set MODELS env (comma-separated) before starting the service."
         )
+    _download_models_if_enabled(config_path, model_allowlist, cache_dir)
     _warn_if_accelerate_missing(config_path, model_allowlist)
     try:
         registry = ModelRegistry(
@@ -52,6 +56,7 @@ def startup() -> tuple[ModelRegistry, BatchingService]:
         logger.exception("Failed to load models during startup", extra={"config_path": config_path})
         # Hard exit to avoid serving traffic with missing/bad models
         raise SystemExit(1) from exc
+    _validate_ffmpeg_for_audio(registry)
 
     batching_enabled = os.getenv("ENABLE_BATCHING", "1") != "0"
     batch_window_ms = float(os.getenv("BATCH_WINDOW_MS", "0"))
@@ -130,6 +135,60 @@ def _warn_if_accelerate_missing(config_path: str, allowlist: list[str] | None) -
                 "FP8 models %s require a GPU/XPU runtime. Select non-FP8 variants or run on GPU.",
                 fp8_models,
             )
+
+
+def _validate_ffmpeg_for_audio(registry: ModelRegistry) -> None:
+    """Ensure ffmpeg is available when audio/Whisper models are loaded."""
+
+    has_audio_model = any("audio-transcription" in getattr(m, "capabilities", []) for m in registry.models.values())
+    if not has_audio_model:
+        return
+    if shutil.which("ffmpeg") is None:
+        raise SystemExit(
+            "ffmpeg not found on PATH. Whisper/audio models require ffmpeg for decoding. "
+            "Install ffmpeg and restart."
+        )
+
+
+def _download_models_if_enabled(config_path: str, allowlist: list[str] | None, cache_dir: str | None) -> None:
+    """Optionally download requested models before startup; exit on failure."""
+
+    if os.getenv("AUTO_DOWNLOAD_MODELS", "1") == "0":
+        logger.info("Auto download disabled; assuming models are pre-fetched")
+        return
+    if snapshot_download is None:
+        raise SystemExit("huggingface_hub is required for auto download")
+
+    try:
+        with Path(config_path).open() as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception as exc:  # pragma: no cover - startup guardrail
+        raise SystemExit(f"Failed to read model config at {config_path}") from exc
+
+    target_dir = Path(cache_dir) if cache_dir else Path.cwd() / "models"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    requested = set(allowlist) if allowlist else None
+    downloaded: list[str] = []
+    for item in cfg.get("models", []):
+        repo_id = item.get("hf_repo_id")
+        name = item.get("name") or repo_id
+        handler = item.get("handler")
+        if not repo_id or not handler:
+            raise SystemExit("Each model requires 'hf_repo_id' and 'handler' in config")
+        if requested is not None and name not in requested:
+            continue
+        logger.info("Downloading model %s (%s) to %s", name, repo_id, target_dir)
+        try:
+            snapshot_download(repo_id=repo_id, cache_dir=target_dir, local_dir_use_symlinks=False)
+            downloaded.append(name)
+        except Exception as exc:  # pragma: no cover - network/runtime failure
+            raise SystemExit(f"Failed to download model {name} ({repo_id})") from exc
+
+    if requested is not None:
+        missing = requested - set(downloaded)
+        if missing:
+            raise SystemExit(f"Requested model(s) not found in config: {', '.join(sorted(missing))}")
 
 
 async def shutdown(batching_service: BatchingService | None) -> None:

@@ -30,6 +30,19 @@ CHAT_REQUEST_LATENCY = Histogram(
     buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0),
 )
 
+AUDIO_REQUEST_COUNT = Counter(
+    "audio_requests_total",
+    "Total number of audio transcription/translation requests",
+    labelnames=("model", "status"),
+)
+
+AUDIO_REQUEST_LATENCY = Histogram(
+    "audio_request_latency_seconds",
+    "Audio request latency in seconds",
+    labelnames=("model",),
+    buckets=(0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 40.0),
+)
+
 QUEUE_REJECTIONS = Counter(
     "embedding_queue_rejections_total",
     "Requests rejected due to queue limits",
@@ -88,3 +101,13 @@ def record_cache_usage(model: str, hits: int, misses: int) -> None:
             CACHE_HITS.labels(model=model).inc(hits)
         if misses:
             CACHE_MISSES.labels(model=model).inc(misses)
+
+
+def record_audio_request(model: str, status: str) -> None:
+    with suppress(Exception):
+        AUDIO_REQUEST_COUNT.labels(model=model, status=status).inc()
+
+
+def observe_audio_latency(model: str, seconds: float) -> None:
+    with suppress(Exception):
+        AUDIO_REQUEST_LATENCY.labels(model=model).observe(seconds)

@@ -25,19 +25,17 @@ def test_registry_loads_from_config(tmp_path: Path) -> None:
         textwrap.dedent(
             """
             models:
-              - name: "bge-m3"
-                hf_repo_id: "BAAI/bge-m3"
+              - hf_repo_id: "BAAI/bge-m3"
                 handler: "tests.test_model_loading.StubModel"
-              - name: "embedding-gemma-300m"
-                hf_repo_id: "google/embeddinggemma-300m"
+              - hf_repo_id: "google/embeddinggemma-300m"
                 handler: "tests.test_model_loading.StubModel"
             """
         )
     )
 
     reg = registry.ModelRegistry(str(cfg), device="cpu")
-    assert set(reg.list_models()) == {"bge-m3", "embedding-gemma-300m"}
-    model = reg.get("bge-m3")
+    assert set(reg.list_models()) == {"BAAI/bge-m3", "google/embeddinggemma-300m"}
+    model = reg.get("BAAI/bge-m3")
     vecs = model.embed(["hello"])
     assert vecs.shape == (1, 4)
     assert model.capabilities == ["text-embedding"]
@@ -51,8 +49,7 @@ def test_registry_accepts_specific_cuda_device(
         textwrap.dedent(
             """
             models:
-              - name: "bge-m3"
-                hf_repo_id: "BAAI/bge-m3"
+              - hf_repo_id: "BAAI/bge-m3"
                 handler: "tests.test_model_loading.StubModel"
             """
         )
@@ -64,7 +61,7 @@ def test_registry_accepts_specific_cuda_device(
     reg = registry.ModelRegistry(str(cfg), device="cuda:1")
 
     assert reg.device == "cuda:1"
-    assert reg.get("bge-m3").device == "cuda:1"
+    assert reg.get("BAAI/bge-m3").device == "cuda:1"
 
 
 def test_registry_respects_allowlist(tmp_path: Path) -> None:
@@ -73,19 +70,17 @@ def test_registry_respects_allowlist(tmp_path: Path) -> None:
         textwrap.dedent(
             """
             models:
-              - name: "a"
-                hf_repo_id: "repo/a"
+              - hf_repo_id: "repo/a"
                 handler: "tests.test_model_loading.StubModel"
-              - name: "b"
-                hf_repo_id: "repo/b"
+              - hf_repo_id: "repo/b"
                 handler: "tests.test_model_loading.StubModel"
             """
         )
     )
 
-    reg = registry.ModelRegistry(str(cfg), device="cpu", allowed_models=["b"])
-    assert set(reg.list_models()) == {"b"}
-    assert reg.get("b").name == "repo/b"
+    reg = registry.ModelRegistry(str(cfg), device="cpu", allowed_models=["repo/b"])
+    assert set(reg.list_models()) == {"repo/b"}
+    assert reg.get("repo/b").name == "repo/b"
 
     with pytest.raises(ValueError):
-        registry.ModelRegistry(str(cfg), device="cpu", allowed_models=["c"])
+        registry.ModelRegistry(str(cfg), device="cpu", allowed_models=["repo/c"])

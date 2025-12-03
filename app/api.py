@@ -1,12 +1,26 @@
 import asyncio
+import contextlib
 import logging
 import os
+import tempfile
 import time
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+import torchaudio
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from app.concurrency.limiter import (
@@ -19,8 +33,10 @@ from app.concurrency.limiter import (
 from app.dependencies import get_model_registry
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import (
+    observe_audio_latency,
     observe_chat_latency,
     observe_latency,
+    record_audio_request,
     record_chat_request,
     record_request,
 )
@@ -28,6 +44,7 @@ from app.threadpool import get_executor
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_BYTES", str(25 * 1024 * 1024)))  # default 25MB
 
 
 class EmbeddingRequest(BaseModel):
@@ -118,6 +135,23 @@ class ChatCompletionResponse(BaseModel):
     usage: Usage
 
 
+# ---- Audio transcription/translation (Whisper-compatible) --------------------
+
+
+class TranscriptionSegment(BaseModel):
+    id: int
+    start: float
+    end: float
+    text: str
+
+
+class TranscriptionVerboseResponse(BaseModel):
+    text: str
+    language: str | None = None
+    duration: float | None = None
+    segments: list[TranscriptionSegment] | None = None
+
+
 def _contains_image_content(messages: Sequence[dict[str, Any]]) -> bool:
     for msg in messages:
         content = msg.get("content")
@@ -134,6 +168,77 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str] | None:
     if isinstance(stop, str):
         return [stop]
     return [s for s in stop if s]
+
+
+async def _save_upload(file: UploadFile, max_bytes: int = MAX_AUDIO_BYTES) -> tuple[str, int]:
+    """Persist UploadFile to a temp file and enforce size guard."""
+
+    data = await file.read()
+    size = len(data)
+    if max_bytes and size > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Audio file too large; max {max_bytes} bytes",
+        )
+    suffix = Path(file.filename or "").suffix or ".wav"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(data)
+        tmp.flush()
+        tmp_path = tmp.name
+    return tmp_path, size
+
+
+def _probe_duration(path: str) -> float | None:
+    try:
+        info = torchaudio.info(path)
+        if info.num_frames and info.sample_rate:
+            return float(info.num_frames) / float(info.sample_rate)
+    except Exception:  # pragma: no cover - best effort only
+        return None
+    return None
+
+
+def _select_granularity(values: list[str] | None) -> Literal["word", "segment", None]:
+    if not values:
+        return None
+    lowered = [v.lower() for v in values]
+    if "word" in lowered:
+        return "word"
+    if "segment" in lowered:
+        return "segment"
+    return None
+
+
+def _format_ts(seconds: float, *, sep: str = ",") -> str:
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:06.3f}".replace(".", sep)
+
+
+def _srt_from_segments(segments: list[dict[str, float | str]]) -> str:
+    lines: list[str] = []
+    for idx, seg in enumerate(segments, start=1):
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start))
+        text = str(seg.get("text", "")).strip()
+        lines.append(str(idx))
+        lines.append(f"{_format_ts(start)} --> {_format_ts(end)}")
+        lines.append(text)
+        lines.append("")  # blank line between entries
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _vtt_from_segments(segments: list[dict[str, float | str]]) -> str:
+    lines: list[str] = ["WEBVTT", ""]
+    for seg in segments:
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start))
+        text = str(seg.get("text", "")).strip()
+        lines.append(f"{_format_ts(start, sep='.')} --> {_format_ts(end, sep='.')}")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 class ModelInfo(BaseModel):
@@ -398,6 +503,208 @@ async def create_chat_completions(  # noqa: PLR0915
         usage=usage,
     )
 
+
+ALLOWED_AUDIO_RESPONSE_FORMATS = {"json", "text", "srt", "verbose_json", "vtt"}
+
+
+async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
+    *,
+    file: UploadFile,
+    model_name: str,
+    registry: ModelRegistry,
+    task: Literal["transcribe", "translate"],
+    language: str | None,
+    prompt: str | None,
+    response_format: str,
+    temperature: float | None,
+    timestamp_granularities: list[str] | None,
+) -> Response:
+    if response_format not in ALLOWED_AUDIO_RESPONSE_FORMATS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid response_format '{response_format}'",
+        )
+
+    # Whisper is deterministic with temperature=0; default to that unless user overrides.
+    effective_temperature = 0.0 if temperature is None else temperature
+    granularity = _select_granularity(timestamp_granularities)
+    need_segments = response_format in {"verbose_json", "srt", "vtt"} or granularity is not None
+
+    start = time.perf_counter()
+    temp_path: str | None = None
+    size_bytes = 0
+    duration: float | None = None
+
+    try:
+        temp_path, size_bytes = await _save_upload(file)
+        duration = _probe_duration(temp_path)
+
+        async with limiter():
+            try:
+                model = registry.get(model_name)
+            except KeyError as exc:
+                record_audio_request(model_name, "404")
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Model {model_name} not found") from exc
+
+            capabilities = getattr(model, "capabilities", [])
+            if "audio-transcription" not in capabilities:
+                record_audio_request(model_name, "400")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Model {model_name} does not support audio transcription",
+                )
+
+            loop = asyncio.get_running_loop()
+            executor = get_executor()
+            try:
+                result = await loop.run_in_executor(
+                    executor,
+                    lambda: model.transcribe(
+                        temp_path,
+                        language=language,
+                        prompt=prompt,
+                        temperature=effective_temperature,
+                        task=task,
+                        timestamp_granularity=granularity if need_segments else None,
+                    ),
+                )
+            except Exception as exc:  # pragma: no cover - runtime failure
+                record_audio_request(model_name, "500")
+                logger.exception(
+                    "audio_transcription_failed",
+                    extra={"model": model_name, "task": task, "status": 500},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Audio processing failed",
+                ) from exc
+    except QueueFullError as exc:
+        record_audio_request(model_name, "429")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Request queue full",
+            headers={"Retry-After": str(int(QUEUE_TIMEOUT_SEC))},
+        ) from exc
+    except ShuttingDownError as exc:
+        record_audio_request(model_name, "503")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service is shutting down",
+        ) from exc
+    except QueueTimeoutError as exc:
+        record_audio_request(model_name, "429")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Timed out waiting for worker",
+            headers={"Retry-After": str(int(QUEUE_TIMEOUT_SEC))},
+        ) from exc
+    finally:
+        if temp_path:
+            with contextlib.suppress(Exception):
+                Path(temp_path).unlink(missing_ok=True)
+
+    latency = time.perf_counter() - start
+    observe_audio_latency(model_name, latency)
+    record_audio_request(model_name, "200")
+    logger.info(
+        "audio_request",
+        extra={
+            "model": model_name,
+            "task": task,
+            "latency_ms": round(latency * 1000, 2),
+            "bytes": size_bytes,
+            "duration": duration,
+            "response_format": response_format,
+        },
+    )
+
+    # Build response content
+    text = getattr(result, "text", "") or ""
+    language_out = getattr(result, "language", None) or language
+    duration_out = getattr(result, "duration", None) or duration
+    segments = getattr(result, "segments", None) or []
+
+    if response_format == "text":
+        return PlainTextResponse(text)
+
+    if response_format == "json":
+        return JSONResponse({"text": text})
+
+    if response_format == "verbose_json":
+        verbose = TranscriptionVerboseResponse(
+            text=text,
+            language=language_out,
+            duration=duration_out,
+            segments=[
+                TranscriptionSegment(id=s.id, start=s.start, end=s.end, text=s.text)
+                for s in segments
+            ]
+            if segments
+            else None,
+        )
+        return JSONResponse(verbose.model_dump(mode="json", exclude_none=True))
+
+    seg_dicts: list[dict[str, float | str]] = [
+        {"id": s.id, "start": s.start, "end": s.end, "text": s.text} for s in segments
+    ]
+    if not seg_dicts:
+        seg_dicts = [{"id": 0, "start": 0.0, "end": duration_out or 0.0, "text": text}]
+
+    if response_format == "srt":
+        return PlainTextResponse(_srt_from_segments(seg_dicts), media_type="application/x-subrip")
+
+    if response_format == "vtt":
+        return PlainTextResponse(_vtt_from_segments(seg_dicts), media_type="text/vtt")
+
+    # Should never reach here because of earlier validation
+    return JSONResponse({"text": text})
+
+
+@router.post("/v1/audio/transcriptions")
+async def create_transcription(  # noqa: PLR0913
+    registry: Annotated[ModelRegistry, Depends(get_model_registry)],
+    file: UploadFile = File(...),  # noqa: B008
+    model: str = Form(...),  # noqa: B008
+    language: str | None = Form(default=None),  # noqa: B008
+    prompt: str | None = Form(default=None),  # noqa: B008
+    response_format: str = Form(default="json"),  # noqa: B008
+    temperature: float | None = Form(default=None),  # noqa: B008
+    timestamp_granularities: list[str] | None = Form(default=None),  # noqa: B008
+) -> Response:
+    return await _handle_audio_request(
+        file=file,
+        model_name=model,
+        registry=registry,
+        task="transcribe",
+        language=language,
+        prompt=prompt,
+        response_format=response_format,
+        temperature=temperature,
+        timestamp_granularities=timestamp_granularities,
+    )
+
+
+@router.post("/v1/audio/translations")
+async def create_translation(  # noqa: PLR0913
+    registry: Annotated[ModelRegistry, Depends(get_model_registry)],
+    file: UploadFile = File(...),  # noqa: B008
+    model: str = Form(...),  # noqa: B008
+    prompt: str | None = Form(default=None),  # noqa: B008
+    response_format: str = Form(default="json"),  # noqa: B008
+    temperature: float | None = Form(default=None),  # noqa: B008
+    timestamp_granularities: list[str] | None = Form(default=None),  # noqa: B008
+) -> Response:
+    return await _handle_audio_request(
+        file=file,
+        model_name=model,
+        registry=registry,
+        task="translate",
+        language="en",  # OpenAI translate outputs English
+        prompt=prompt,
+        response_format=response_format,
+        temperature=temperature,
+        timestamp_granularities=timestamp_granularities,
+    )
 
 @router.get("/v1/models", response_model=ModelsResponse)
 async def list_models(

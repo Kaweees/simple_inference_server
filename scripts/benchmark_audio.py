@@ -3,23 +3,36 @@
 import asyncio
 import os
 import time
+import wave
+from pathlib import Path
 
 import httpx
 import numpy as np
 
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
-MODEL_NAME = os.getenv("MODEL_NAME", "BAAI/bge-m3")
-N_REQUESTS = int(os.getenv("N_REQUESTS", "20"))
-CONCURRENCY = int(os.getenv("CONCURRENCY", "5"))
-TEXT = os.getenv("TEXT", "hello world")
+MODEL_NAME = os.getenv("MODEL_NAME", "openai/whisper-tiny")
+AUDIO_FILE = os.getenv("AUDIO_FILE", "sample.wav")
+N_REQUESTS = int(os.getenv("N_REQUESTS", "10"))
+CONCURRENCY = int(os.getenv("CONCURRENCY", "2"))
 VERIFY_SSL = os.getenv("VERIFY_SSL", "0") != "0"
-TIMEOUT = float(os.getenv("TIMEOUT", "30"))
+TIMEOUT = float(os.getenv("TIMEOUT", "60"))
+RESPONSE_FORMAT = os.getenv("RESPONSE_FORMAT", "json")
 VERBOSE = os.getenv("VERBOSE", "0") != "0"
 
 
-async def worker(
-    queue: asyncio.Queue, client: httpx.AsyncClient, results: list[float], errors: list[str]
-) -> None:
+def _ensure_audio(path: str) -> bytes:
+    p = Path(path)
+    if not p.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(p), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(b"\x00\x00" * 16000)  # 1s silence
+    return p.read_bytes()
+
+
+async def worker(queue: asyncio.Queue, client: httpx.AsyncClient, audio: bytes, results: list[float], errors: list[str]) -> None:
     while True:
         try:
             _ = await queue.get()
@@ -28,12 +41,12 @@ async def worker(
         start = time.perf_counter()
         try:
             resp = await client.post(
-                f"{BASE_URL}/v1/embeddings",
-                json={"model": MODEL_NAME, "input": TEXT},
+                f"{BASE_URL}/v1/audio/transcriptions",
+                data={"model": MODEL_NAME, "response_format": RESPONSE_FORMAT},
+                files={"file": ("audio.wav", audio, "audio/wav")},
             )
             resp.raise_for_status()
-            latency = time.perf_counter() - start
-            results.append(latency)
+            results.append(time.perf_counter() - start)
         except Exception as exc:  # noqa: BLE001
             errors.append(str(exc))
         finally:
@@ -41,6 +54,7 @@ async def worker(
 
 
 async def run() -> None:
+    audio_bytes = _ensure_audio(AUDIO_FILE)
     queue: asyncio.Queue = asyncio.Queue()
     for _ in range(N_REQUESTS):
         queue.put_nowait(1)
@@ -48,17 +62,10 @@ async def run() -> None:
     results: list[float] = []
     errors: list[str] = []
     async with httpx.AsyncClient(verify=VERIFY_SSL, timeout=TIMEOUT) as client:
-        tasks = [
-            asyncio.create_task(worker(queue, client, results, errors))
-            for _ in range(CONCURRENCY)
-        ]
+        tasks = [asyncio.create_task(worker(queue, client, audio_bytes, results, errors)) for _ in range(CONCURRENCY)]
         await queue.join()
         for t in tasks:
             t.cancel()
-
-    if not results:
-        print("No results")
-        return
 
     successes = len(results)
     failures = len(errors)

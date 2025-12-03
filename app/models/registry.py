@@ -11,10 +11,6 @@ import torch
 import yaml
 
 from app.models.base import ChatModel, EmbeddingModel
-from app.models.bge_m3 import BgeM3Embedding
-from app.models.embedding_gemma import EmbeddingGemmaEmbedding
-from app.models.qwen_vl import QwenVLChat
-from app.models.text_chat import TextChatModel
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +81,11 @@ class ModelRegistry:
         requested = set(self.allowed_models) if self.allowed_models is not None else None
         loaded: set[str] = set()
         for item in models_cfg:
-            name = item["name"]
+            repo = item["hf_repo_id"]
+            name = item.get("name") or repo
             if requested is not None and name not in requested:
                 continue
             handler_path = item.get("handler")
-            repo = item["hf_repo_id"]
             gen_defaults = item.get("defaults") or {}
             if "fp8" in str(repo).lower() and not self._has_fp8_hardware():
                 raise RuntimeError(
@@ -97,11 +93,9 @@ class ModelRegistry:
                     "Use a non-FP8 repo (e.g., the BF16/FP16 variant) or run on GPU/XPU hardware."
                 )
 
-            handler_factory = (
-                self._import_handler(handler_path)
-                if handler_path
-                else self._default_handler_for(name)
-            )
+            if not handler_path:
+                raise ValueError(f"Model '{name}' is missing a handler in config")
+            handler_factory = self._import_handler(handler_path)
 
             model = handler_factory(repo, self.device)
             # Optional per-model generation defaults (e.g., temperature, top_p, max_tokens) for chat-capable models only.
@@ -128,24 +122,6 @@ class ModelRegistry:
             return handler
         except AttributeError as exc:  # pragma: no cover - defensive
             raise ImportError(f"Handler class {class_name} not found in {module_path}") from exc
-
-    def _default_handler_for(self, name: str) -> Callable[[str, str], EmbeddingModel | ChatModel]:
-        if name == "bge-m3":
-            return BgeM3Embedding
-        if name == "embedding-gemma-300m":
-            return EmbeddingGemmaEmbedding
-        if name in {"qwen3-vl-4b-instruct-fp8", "qwen3-vl-2b-instruct-fp8"}:
-            return QwenVLChat
-        if name in {
-            "qwen3-vl-4b-instruct",
-            "qwen3-vl-2b-instruct",
-            "qwen3-4b-instruct-2507",
-            "qwen3-4b-instruct-2507-fp8",
-            "llama-3.2-1b-instruct",
-            "llama-3.2-3b-instruct",
-        }:
-            return TextChatModel
-        raise ValueError(f"Unknown model name: {name}")
 
     def get(self, name: str) -> Any:
         if name not in self.models:

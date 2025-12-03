@@ -5,7 +5,7 @@ Quick chat benchmark against the local OpenAI-compatible endpoint.
 
 Env overrides (also mirrored as CLI flags):
   BASE_URL      - server base URL (default http://localhost:8000)
-  MODEL_NAME    - chat model name (default qwen3-vl-2b-instruct)
+  MODEL_NAME    - chat model name (default Qwen/Qwen3-VL-2B-Instruct)
   PROMPT        - user prompt (default "Hello, how are you?")
   MAX_TOKENS    - max new tokens to request (default 128)
   TEMPERATURE   - temperature (default 0.7)
@@ -107,7 +107,7 @@ async def run(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark /v1/chat/completions endpoint.")
     parser.add_argument("--base-url", default=os.getenv("BASE_URL", "http://localhost:8000"))
-    parser.add_argument("--model-name", default=os.getenv("MODEL_NAME", "qwen3-vl-2b-instruct"))
+    parser.add_argument("--model-name", default=os.getenv("MODEL_NAME", "Qwen/Qwen3-VL-2B-Instruct"))
     parser.add_argument("--prompt", default=os.getenv("PROMPT", "Hello, how are you?"))
     parser.add_argument("--max-tokens", type=int, default=int(os.getenv("MAX_TOKENS", "128")))
     parser.add_argument("--temperature", type=float, default=float(os.getenv("TEMPERATURE", "0.7")))

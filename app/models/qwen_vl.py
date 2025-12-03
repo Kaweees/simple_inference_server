@@ -49,7 +49,7 @@ class QwenVLChat(ChatModel):
     """Chat handler for Qwen3-VL models with OpenAI-compatible inputs."""
 
     def __init__(self, hf_repo_id: str, device: str = "auto") -> None:
-        self.name = hf_repo_id.split("/")[-1]
+        self.name = hf_repo_id
         self.capabilities = ["chat-completion", "vision"]
         self.device = device
         self.hf_repo_id = hf_repo_id

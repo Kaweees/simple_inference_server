@@ -42,7 +42,7 @@ class TextChatModel(ChatModel):
     """Generic text-only chat handler using HF chat template."""
 
     def __init__(self, hf_repo_id: str, device: str = "auto") -> None:
-        self.name = hf_repo_id.split("/")[-1]
+        self.name = hf_repo_id
         self.capabilities = ["chat-completion"]
         self.device = device
         self.hf_repo_id = hf_repo_id

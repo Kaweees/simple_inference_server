@@ -26,10 +26,10 @@ def main() -> None:
     requested = {m.strip() for m in MODELS.split(",") if m.strip()} if MODELS else None
     downloaded: set[str] = set()
     for item in cfg.get("models", []):
-        name = item["name"]
+        repo_id = item["hf_repo_id"]
+        name = item.get("name") or repo_id
         if requested is not None and name not in requested:
             continue
-        repo_id = item["hf_repo_id"]
         print(f"Downloading {name} ({repo_id}) to {target_dir} ...")
         snapshot_download(
             repo_id=repo_id,

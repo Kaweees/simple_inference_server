@@ -12,7 +12,7 @@ services:
     container_name: inference-chat
     environment:
       # Chat-only replica on GPU0
-      - MODELS=llama-3.2-3b-instruct
+      - MODELS=meta-llama/Llama-3.2-3B-Instruct
       - MODEL_DEVICE=cuda
       - MAX_CONCURRENT=1           # keep decode contention low
       - ENABLE_BATCHING=0          # chat path runs per-request
@@ -40,7 +40,7 @@ services:
     container_name: inference-embed
     environment:
       # Embedding replica on GPU1
-      - MODELS=bge-m3
+      - MODELS=BAAI/bge-m3
       - MODEL_DEVICE=cuda
       - ENABLE_BATCHING=1
       - BATCH_WINDOW_MS=6

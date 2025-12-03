@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Sequence
 
 import numpy as np
 
@@ -46,3 +46,36 @@ class ChatModel(Protocol):
     ) -> ChatGeneration: ...
 
     def count_tokens(self, messages: Sequence[dict[str, Any]]) -> int: ...
+
+
+@dataclass
+class SpeechSegment:
+    id: int
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
+class SpeechResult:
+    text: str
+    language: str | None = None
+    duration: float | None = None
+    segments: list[SpeechSegment] | None = None
+
+
+class SpeechModel(Protocol):
+    name: str
+    device: str | torch.device
+    capabilities: list[str]
+
+    def transcribe(
+        self,
+        audio_path: str,
+        *,
+        language: str | None,
+        prompt: str | None,
+        temperature: float | None,
+        task: Literal["transcribe", "translate"],
+        timestamp_granularity: Literal["word", "segment", None],
+    ) -> SpeechResult: ...

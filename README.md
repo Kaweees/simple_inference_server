@@ -7,6 +7,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - Serve multiple local HF models behind OpenAI-style endpoints.
 - Get embeddings via `/v1/embeddings`.
 - Chat via `/v1/chat/completions` (Qwen3-VL supports image inputs).
+- Transcribe or translate audio via `/v1/audio/transcriptions` and `/v1/audio/translations` (Whisper-compatible).
 - Observe with `/metrics`, guard with batching/backpressure, and list models with `/v1/models`.
 
 ## Requirements
@@ -14,6 +15,8 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - Python ≥ 3.12
 - Local model weights (downloaded ahead of time)
 - For FP8 models or `device_map=auto`: `accelerate` (already in deps)
+- For Whisper audio: system `ffmpeg` (or torchaudio-compatible codecs) installed and on PATH
+- Startup will fail hard if any requested model fails to download or load (auto-download is on by default; disable with `AUTO_DOWNLOAD_MODELS=0` if you want prefetch-only).
 
 ## Quick start
 
@@ -23,16 +26,28 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
    uv sync
    ```
 
-2) Download the models you plan to load (example: embeddings + small chat)  
+2) Download the models you plan to load (examples) — optional if you keep AUTO_DOWNLOAD_MODELS=1  
 
    ```bash
-   MODELS=bge-m3,llama-3.2-1b-instruct uv run python scripts/download_models.py
+   MODELS=BAAI/bge-m3,meta-llama/Llama-3.2-1B-Instruct uv run python scripts/download_models.py
+   ```
+
+   Audio (Whisper) quick demo:  
+
+   ```bash
+   MODELS=openai/whisper-tiny uv run python scripts/download_models.py
    ```
 
 3) Run the server  
 
    ```bash
-   MODELS=bge-m3,llama-3.2-1b-instruct uv run python scripts/run_dev.py --device auto
+   MODELS=BAAI/bge-m3,meta-llama/Llama-3.2-1B-Instruct uv run python scripts/run_dev.py --device auto
+   ```
+
+   Run only Whisper for ASR/translation (auto-download will fetch weights if missing):  
+
+   ```bash
+   MODELS=openai/whisper-tiny uv run python scripts/run_dev.py --device auto
    ```
 
 4) Call the API  
@@ -41,7 +56,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
      ```bash
      curl -X POST http://localhost:8000/v1/embeddings \
        -H "Content-Type: application/json" \
-       -d '{"model":"bge-m3","input":"hello world"}'
+       -d '{"model":"BAAI/bge-m3","input":"hello world"}'
      ```
 
    - Chat (text only, small model):
@@ -49,7 +64,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
      ```bash
      curl -X POST http://localhost:8000/v1/chat/completions \
        -H "Content-Type: application/json" \
-       -d '{"model":"llama-3.2-1b-instruct","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":128}'
+       -d '{"model":"meta-llama/Llama-3.2-1B-Instruct","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":128}'
      ```
 
    - Chat with image (Qwen3-VL):
@@ -58,7 +73,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
      curl -X POST http://localhost:8000/v1/chat/completions \
        -H "Content-Type: application/json" \
        -d '{
-             "model": "qwen3-vl-4b-instruct",
+             "model": "Qwen/Qwen3-VL-4B-Instruct",
              "messages": [
                {"role": "user", "content": [
                  {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...truncated..."}},
@@ -69,10 +84,20 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
            }'
      ```
 
+   - Audio transcription (Whisper, OpenAI-compatible):
+
+     ```bash
+     curl -X POST http://localhost:8000/v1/audio/transcriptions \
+       -F "model=openai/whisper-tiny" \
+       -F "file=@/path/to/sample.wav" \
+       -F "response_format=text"
+     ```
+
 ## Configuration highlights
 
 - `MODELS` (required): comma-separated model IDs from `configs/model_config.yaml`.
 - `MODEL_DEVICE`: `cpu` | `mps` | `cuda` | `cuda:<idx>` | `auto` (default).
+- `AUTO_DOWNLOAD_MODELS` (default `1`): download selected models on startup; set to `0` to require pre-downloaded weights. Startup exits on download/load failure.
 - Chat generation defaults: per-model `defaults` (temperature/top_p/max_tokens) in the config; request args override.
 - Vision fetch safety (Qwen3-VL): `ALLOW_REMOTE_IMAGES=0` (default), `REMOTE_IMAGE_TIMEOUT=5`, `MAX_REMOTE_IMAGE_BYTES=5242880`.
 - FP8 models need `accelerate`; non-FP8 variants avoid this dependency.
@@ -91,16 +116,27 @@ All supported models are defined in `configs/model_config.yaml` (kept as the cat
 
 | id (`model` param) | HF repo | Handler |
 | --- | --- | --- |
-| `bge-m3` | `BAAI/bge-m3` | `app.models.bge_m3.BgeM3Embedding` |
-| `embedding-gemma-300m` | `google/embeddinggemma-300m` | `app.models.embedding_gemma.EmbeddingGemmaEmbedding` |
-| `qwen3-vl-4b-instruct-fp8` | `Qwen/Qwen3-VL-4B-Instruct-FP8` | `app.models.qwen_vl.QwenVLChat` |
-| `qwen3-vl-2b-instruct-fp8` | `Qwen/Qwen3-VL-2B-Instruct-FP8` | `app.models.qwen_vl.QwenVLChat` |
-| `qwen3-vl-4b-instruct` | `Qwen/Qwen3-VL-4B-Instruct` | `app.models.qwen_vl.QwenVLChat` |
-| `qwen3-vl-2b-instruct` | `Qwen/Qwen3-VL-2B-Instruct` | `app.models.qwen_vl.QwenVLChat` |
-| `qwen3-4b-instruct-2507` | `Qwen/Qwen3-4B-Instruct-2507` | `app.models.text_chat.TextChatModel` |
-| `qwen3-4b-instruct-2507-fp8` | `Qwen/Qwen3-4B-Instruct-2507-FP8` | `app.models.text_chat.TextChatModel` |
-| `llama-3.2-1b-instruct` | `meta-llama/Llama-3.2-1B-Instruct` | `app.models.text_chat.TextChatModel` |
-| `llama-3.2-3b-instruct` | `meta-llama/Llama-3.2-3B-Instruct` | `app.models.text_chat.TextChatModel` |
+| `BAAI/bge-m3` | `BAAI/bge-m3` | `app.models.bge_m3.BgeM3Embedding` |
+| `google/embeddinggemma-300m` | `google/embeddinggemma-300m` | `app.models.embedding_gemma.EmbeddingGemmaEmbedding` |
+| `Qwen/Qwen3-VL-4B-Instruct-FP8` | `Qwen/Qwen3-VL-4B-Instruct-FP8` | `app.models.qwen_vl.QwenVLChat` |
+| `Qwen/Qwen3-VL-2B-Instruct-FP8` | `Qwen/Qwen3-VL-2B-Instruct-FP8` | `app.models.qwen_vl.QwenVLChat` |
+| `Qwen/Qwen3-VL-4B-Instruct` | `Qwen/Qwen3-VL-4B-Instruct` | `app.models.qwen_vl.QwenVLChat` |
+| `Qwen/Qwen3-VL-2B-Instruct` | `Qwen/Qwen3-VL-2B-Instruct` | `app.models.qwen_vl.QwenVLChat` |
+| `Qwen/Qwen3-4B-Instruct-2507` | `Qwen/Qwen3-4B-Instruct-2507` | `app.models.text_chat.TextChatModel` |
+| `Qwen/Qwen3-4B-Instruct-2507-FP8` | `Qwen/Qwen3-4B-Instruct-2507-FP8` | `app.models.text_chat.TextChatModel` |
+| `meta-llama/Llama-3.2-1B-Instruct` | `meta-llama/Llama-3.2-1B-Instruct` | `app.models.text_chat.TextChatModel` |
+| `meta-llama/Llama-3.2-3B-Instruct` | `meta-llama/Llama-3.2-3B-Instruct` | `app.models.text_chat.TextChatModel` |
+| `jethrowang/whisper-tiny-chinese` | `jethrowang/whisper-tiny-chinese` | `app.models.whisper.WhisperASR` |
+| `Ivydata/whisper-small-japanese` | `Ivydata/whisper-small-japanese` | `app.models.whisper.WhisperASR` |
+| `BELLE-2/Belle-whisper-large-v3-zh` | `BELLE-2/Belle-whisper-large-v3-zh` | `app.models.whisper.WhisperASR` |
+| `whisper-large-v3-japanese-4k-steps` | `whisper-large-v3-japanese-4k-steps` | `app.models.whisper.WhisperASR` |
+| `openai/whisper-large-v2` | `openai/whisper-large-v2` | `app.models.whisper.WhisperASR` |
+| `openai/whisper-medium` | `openai/whisper-medium` | `app.models.whisper.WhisperASR` |
+| `openai/whisper-medium.en` | `openai/whisper-medium.en` | `app.models.whisper.WhisperASR` |
+| `openai/whisper-small` | `openai/whisper-small` | `app.models.whisper.WhisperASR` |
+| `openai/whisper-small.en` | `openai/whisper-small.en` | `app.models.whisper.WhisperASR` |
+| `openai/whisper-tiny` | `openai/whisper-tiny` | `app.models.whisper.WhisperASR` |
+| `openai/whisper-tiny.en` | `openai/whisper-tiny.en` | `app.models.whisper.WhisperASR` |
 
 FP8 Qwen3-VL models require `accelerate` (added to dependencies). If you prefer non-quantized weights, swap the repos to `Qwen/Qwen3-VL-4B-Instruct` or `Qwen/Qwen3-VL-2B-Instruct` in `configs/model_config.yaml`; all other logic remains the same.
 
@@ -118,6 +154,14 @@ Per-model generation defaults (temperature / top_p / max_tokens) can be set in `
   - `max_tokens` (optional; falls back to per-model default then env `MAX_NEW_TOKENS` → 512)
   - `temperature`, `top_p`, `stop`, `user` as in OpenAI; `n` must be 1; `stream` is not yet supported
   - `top_k` is intentionally unsupported for OpenAI compatibility
+- `POST /v1/audio/transcriptions`: OpenAI Whisper-compatible ASR. Multipart form fields:
+  - `file` (required): audio file (e.g., wav/m4a/mp3)
+  - `model` (string): Whisper model id (e.g., `openai/whisper-tiny`)
+  - `language` (optional): ISO code to skip auto-detect (e.g., `ja`, `zh`)
+  - `prompt`, `temperature` (optional): bias decoding / adjust randomness
+  - `response_format` (default `json`): `json` | `text` | `srt` | `vtt` | `verbose_json`
+  - `timestamp_granularities` (optional): `segment` or `word` to include timestamps when supported
+- `POST /v1/audio/translations`: same as transcriptions but forces English output; accepts `prompt`, `temperature`, `response_format`, and `timestamp_granularities`.
 - `GET /v1/models`: List loaded models with id, owner, and embedding dimensions.
 - `GET /health`: Liveness/readiness check; returns 503 if the registry is not ready.
 - `GET /metrics`: Prometheus metrics (enabled by default; toggle via `ENABLE_METRICS`).
@@ -129,9 +173,9 @@ uv sync
 ```
 
 ```bash
-MODELS=bge-m3 uv run python scripts/run_dev.py --device auto
+MODELS=BAAI/bge-m3 uv run python scripts/run_dev.py --device auto
 # MODELS must be set (comma-separated). Alternatively:
-# uv run python scripts/run_dev.py --models bge-m3,llama-3.2-1b-instruct
+# uv run python scripts/run_dev.py --models BAAI/bge-m3,meta-llama/Llama-3.2-1B-Instruct
 ```
 
 Default model cache is locked to the repo-local `models/` directory. Pre-download models via `scripts/download_models.py` (always writes to `models/`) before building or running the service. For private/licensed models, set `HF_TOKEN` only when running the download script; the runtime uses local files only.
@@ -150,6 +194,7 @@ Embedding cache: repeated inputs are served from an in-memory LRU keyed by the f
 - **Warmup**: keep `ENABLE_WARMUP=1`; for heavier models raise `WARMUP_STEPS` / `WARMUP_BATCH_SIZE` (e.g., 2–3 steps, batch 4–8). Restart after changing models or devices.
 - **Device choice**: set `MODEL_DEVICE` (`cuda`, `cuda:<idx>`, `mps`, `cpu`). On macOS MPS, performance varies with temperature/power; on CUDA you can try `MAX_CONCURRENT=2–4`.
 - **Batch/input guards**: `MAX_BATCH_SIZE` and `MAX_TEXT_CHARS` protect the API—keep them within what the model can handle.
+- **Audio guard**: `MAX_AUDIO_BYTES` (default 25MB) limits upload size for Whisper endpoints.
 - **Metrics & logs**: `ENABLE_METRICS` exposes `/metrics`; logs include `runtime_config`, `warmup_ok`, and `embedding_request` to observe tuning impact.
 
 ### GPU tuning (example starting points)
@@ -164,7 +209,7 @@ Embedding cache: repeated inputs are served from an in-memory LRU keyed by the f
 curl -X POST http://localhost:8000/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{
-        "model": "bge-m3",
+        "model": "BAAI/bge-m3",
         "input": ["hello", "world"]
       }'
 ```
@@ -178,7 +223,7 @@ Expected response shape (truncated):
     {"object": "embedding", "index": 0, "embedding": [ ... ]},
     {"object": "embedding", "index": 1, "embedding": [ ... ]}
   ],
-  "model": "bge-m3",
+  "model": "BAAI/bge-m3",
   "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": null}
 }
 ```
@@ -189,7 +234,7 @@ Chat completion with an image (Qwen3-VL):
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-        "model": "qwen3-vl-4b-instruct-fp8",
+        "model": "Qwen/Qwen3-VL-4B-Instruct-FP8",
         "messages": [
           {"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...truncated..."}},
@@ -206,7 +251,7 @@ Basic chat (text only):
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-        "model": "llama-3.2-1b-instruct",
+        "model": "meta-llama/Llama-3.2-1B-Instruct",
         "messages": [
           {"role": "user", "content": "Who are you?"}
         ],
@@ -217,10 +262,11 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 ## Benchmarking
 
-- Embeddings: `uv run python scripts/benchmark_embeddings.py --models bge-m3 --n-requests 50 --concurrency 8`
-- Chat: `uv run python scripts/benchmark_chat.py --model-name llama-3.2-1b-instruct --prompt "Explain FP8 quantization" --n-requests 40 --concurrency 8`
+- Embeddings: `uv run python scripts/benchmark_embeddings.py --models BAAI/bge-m3 --n-requests 50 --concurrency 8`
+- Chat: `uv run python scripts/benchmark_chat.py --model-name meta-llama/Llama-3.2-1B-Instruct --prompt "Explain FP8 quantization" --n-requests 40 --concurrency 8`
+- Audio (Whisper): `BASE_URL=http://localhost:8000 MODEL_NAME=openai/whisper-tiny uv run python scripts/benchmark_audio.py -- --n-requests 20 --concurrency 4`
 
-Both scripts also accept environment overrides (e.g., `BASE_URL`, `MODEL_NAME`, `PROMPT`, `N_REQUESTS`, `CONCURRENCY`).
+All benchmark scripts accept environment overrides (e.g., `BASE_URL`, `MODEL_NAME`, `PROMPT`, `N_REQUESTS`, `CONCURRENCY`).
 
 ## Adding a new model
 

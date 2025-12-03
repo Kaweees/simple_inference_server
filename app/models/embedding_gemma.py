@@ -13,7 +13,7 @@ from app.models.base import EmbeddingModel
 
 class EmbeddingGemmaEmbedding(EmbeddingModel):
     def __init__(self, hf_repo_id: str, device: str = "cuda") -> None:
-        self.name = "embedding-gemma-300m"
+        self.name = hf_repo_id
         self.capabilities = ["text-embedding"]
         self.device = torch.device(device)
         self.hf_repo_id = hf_repo_id
