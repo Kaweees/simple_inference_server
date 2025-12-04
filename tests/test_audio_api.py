@@ -216,7 +216,7 @@ async def test_save_upload_removes_temp_on_limit(monkeypatch: pytest.MonkeyPatch
     recorded_paths: list[str] = []
     original_tempfile = tempfile.NamedTemporaryFile
 
-    def tracking_tempfile(*args: Any, **kwargs: Any) -> tempfile._TemporaryFileWrapper[bytes]:
+    def tracking_tempfile(*args: Any, **kwargs: Any) -> tempfile._TemporaryFileWrapper:
         tmp = original_tempfile(*args, **kwargs)
         recorded_paths.append(tmp.name)
         return tmp
