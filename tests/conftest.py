@@ -6,7 +6,7 @@ import contextlib
 import importlib.machinery
 import sys
 import types
-from typing import Any
+from typing import Any, Iterator
 
 # Several tests (and third-party imports) look for torchaudio. Provide a minimal
 # stub with a ModuleSpec so importlib.util.find_spec works without the real
@@ -122,12 +122,15 @@ class _NDArray:  # pragma: no cover - stub type only
     def __init__(self, data: Any) -> None:
         self.data = data
 
+    def __hash__(self) -> int:
+        return hash(id(self))
+
     def tolist(self) -> Any:
         if isinstance(self.data, list):
-            return [getattr(v, "tolist", lambda: v)() for v in self.data]
+            return [v.tolist() if hasattr(v, "tolist") else v for v in self.data]
         return self.data
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Any]:
         return iter(self.data)
 
     def __getitem__(self, idx: Any) -> Any:
