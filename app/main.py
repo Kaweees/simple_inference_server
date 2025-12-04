@@ -9,11 +9,10 @@ from pathlib import Path
 import huggingface_hub as hf
 import torch
 import yaml
-from app import warmup
 from fastapi import FastAPI
 from huggingface_hub import snapshot_download
 
-from app import state
+from app import state, warmup
 from app.api import router as api_router
 from app.batching import BatchingService
 from app.chat_batching import ChatBatchingService, shutdown_count_executor
@@ -24,14 +23,14 @@ from app.logging_config import setup_logging
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import setup_metrics
 from app.state import WarmupStatus
-from app.threadpool import shutdown_executors
-from app.warmup import warm_up_models
 from app.threadpool import (
-    EMBEDDING_MAX_WORKERS,
-    CHAT_MAX_WORKERS,
-    VISION_MAX_WORKERS,
     AUDIO_MAX_WORKERS,
+    CHAT_MAX_WORKERS,
+    EMBEDDING_MAX_WORKERS,
+    VISION_MAX_WORKERS,
+    shutdown_executors,
 )
+from app.warmup import warm_up_models
 
 logger = logging.getLogger(__name__)
 

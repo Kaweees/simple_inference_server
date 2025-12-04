@@ -1,10 +1,11 @@
 import asyncio
+import contextlib
+import contextvars
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-import contextvars
 
-from app.monitoring.metrics import observe_queue_wait, record_queue_rejection, GENERIC_LABEL_WARN
+from app.monitoring.metrics import GENERIC_LABEL_WARN, observe_queue_wait, record_queue_rejection
 
 
 class QueueFullError(Exception):
@@ -90,10 +91,8 @@ def set_queue_label(label: str) -> contextvars.Token[str]:
 
 
 def reset_queue_label(token: contextvars.Token[str]) -> None:
-    try:
+    with contextlib.suppress(Exception):
         _queue_label.reset(token)
-    except Exception:
-        pass
 
 
 def stop_accepting() -> None:

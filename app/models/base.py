@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Sequence
 
@@ -43,6 +44,7 @@ class ChatModel(Protocol):
         temperature: float,
         top_p: float,
         stop: list[str] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ChatGeneration: ...
 
     def prepare_inputs(
@@ -60,6 +62,7 @@ class ChatModel(Protocol):
         temperature: float,
         top_p: float,
         stop: list[str] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ChatGeneration: ...
 
     def batched_generate_prepared(
@@ -70,6 +73,7 @@ class ChatModel(Protocol):
         temperature: float,
         top_p: float,
         stop: list[str] | None = None,
+        cancel_events: list[threading.Event] | None = None,
     ) -> list[ChatGeneration]: ...
 
     def count_tokens(self, messages: Sequence[dict[str, Any]]) -> int: ...

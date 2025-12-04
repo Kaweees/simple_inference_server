@@ -1,6 +1,8 @@
-import os
-import types
 
+from pathlib import Path
+from typing import Any
+
+import numpy as np
 import pytest
 
 from app import main
@@ -13,14 +15,14 @@ class FailingModel(EmbeddingModel):
     device = "cpu"
     capabilities = ["text-embedding"]
 
-    def embed(self, texts: list[str]):  # pragma: no cover - not called
+    def embed(self, texts: list[str]) -> np.ndarray:  # pragma: no cover - not called
         raise RuntimeError("should not run")
 
     def count_tokens(self, texts: list[str]) -> int:  # pragma: no cover - not called
         return 0
 
 
-def test_warmup_fail_fast_exits(tmp_path, monkeypatch):
+def test_warmup_fail_fast_exits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = tmp_path / "model_config.yaml"
     cfg.write_text(
         """
@@ -39,11 +41,10 @@ models:
     monkeypatch.setattr(main, "snapshot_download", lambda **kwargs: None)
 
     # stub warmup to raise
-    def _fail(*_args, **_kwargs):
+    def _fail(*_args: Any, **_kwargs: Any) -> list[str]:
         return ["fail/repo"]
 
     monkeypatch.setattr(main, "warm_up_models", _fail)
 
     with pytest.raises(SystemExit):
         main.startup()
-

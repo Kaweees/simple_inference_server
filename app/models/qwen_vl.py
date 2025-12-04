@@ -12,10 +12,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import httpx
 import torch
 from PIL import Image
-import httpx
-import threading
 from transformers import (
     AutoModelForCausalLM,
     AutoProcessor,
@@ -49,6 +48,28 @@ class _StopOnTokens(StoppingCriteria):
                 self.triggered = True
                 return True
         return False
+
+
+class _StopOnCancel(StoppingCriteria):
+    """Stop generation when a cancellation event is set."""
+
+    def __init__(self, event: threading.Event) -> None:
+        super().__init__()
+        self.event = event
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any) -> bool:  # noqa: D401
+        return self.event.is_set()
+
+
+class _StopOnCancelAny(StoppingCriteria):
+    """Stop batched generation when any cancellation event is set."""
+
+    def __init__(self, events: list[threading.Event]) -> None:
+        super().__init__()
+        self.events = events
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any) -> bool:  # noqa: D401
+        return any(ev.is_set() for ev in self.events)
 
 
 class QwenVLChat(ChatModel):
@@ -102,9 +123,10 @@ class QwenVLChat(ChatModel):
         temperature: float,
         top_p: float,
         stop: list[str] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ChatGeneration:
         with self._gen_lock:
-            stop_criteria, stop_flag = self._build_stop_criteria(stop)
+            stop_criteria, stop_flag = self._build_stop_criteria(stop, cancel_event)
             prepared_inputs, prompt_len = self.prepare_inputs(messages, add_generation_prompt=True)
             inputs = {k: v.to(self.model.device) for k, v in prepared_inputs.items() if k != "_prompt_len"}
 
@@ -145,9 +167,10 @@ class QwenVLChat(ChatModel):
         temperature: float,
         top_p: float,
         stop: list[str] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ChatGeneration:
         with self._gen_lock:
-            stop_criteria, stop_flag = self._build_stop_criteria(stop)
+            stop_criteria, stop_flag = self._build_stop_criteria(stop, cancel_event)
             prompt_len = int(prepared.get("_prompt_len") or prepared["input_ids"].shape[1])
             inputs = {k: v.to(self.model.device) for k, v in prepared.items() if k != "_prompt_len"}
 
@@ -247,19 +270,24 @@ class QwenVLChat(ChatModel):
         temperature: float,
         top_p: float,
         stop: list[str] | None = None,
+        cancel_events: list[threading.Event] | None = None,
     ) -> list[ChatGeneration]:
         # Vision models are not batched by default; fall back to sequential generation.
         with self._gen_lock:
-            return [
-                self.generate_prepared(
-                    prepared,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    stop=stop,
+            cancel_events = cancel_events or [threading.Event() for _ in prepared_list]
+            generations: list[ChatGeneration] = []
+            for prepared, cancel_event in zip(prepared_list, cancel_events, strict=False):
+                generations.append(
+                    self.generate_prepared(
+                        prepared,
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
+                        stop=stop,
+                        cancel_event=cancel_event,
+                    )
                 )
-                for prepared in prepared_list
-            ]
+            return generations
 
     def prepare_inputs(
         self,
@@ -281,15 +309,21 @@ class QwenVLChat(ChatModel):
 
     # ----------- Helpers ----------------------------------------------------
     def _build_stop_criteria(
-        self, stop: list[str] | None
+        self, stop: list[str] | None, cancel_event: threading.Event | None
     ) -> tuple[StoppingCriteriaList | None, _StopOnTokens | None]:
-        if not stop:
-            return None, None
-        stop_token_ids = [
-            self.processor.tokenizer.encode(s, add_special_tokens=False) for s in stop if s
-        ]
-        stopper = _StopOnTokens(stop_token_ids)
-        return StoppingCriteriaList([stopper]), stopper
+        criteria: list[StoppingCriteria] = []
+        stopper = None
+        if stop:
+            stop_token_ids = [
+                self.processor.tokenizer.encode(s, add_special_tokens=False) for s in stop if s
+            ]
+            stopper = _StopOnTokens(stop_token_ids)
+            criteria.append(stopper)
+        if cancel_event is not None:
+            criteria.append(_StopOnCancel(cancel_event))
+        if not criteria:
+            return None, stopper
+        return StoppingCriteriaList(criteria), stopper
 
     def _to_qwen_messages(self, messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         qwen_messages: list[dict[str, Any]] = []
@@ -372,7 +406,10 @@ class QwenVLChat(ChatModel):
                 raise ValueError("Remote image URLs are disabled (set ALLOW_REMOTE_IMAGES=1 to enable)")
 
             parsed = urllib.parse.urlparse(source)
-            if host_allowlist and parsed.hostname not in host_allowlist:
+            if not host_allowlist:
+                # TODO: tighten remote fetch safety (private ranges, content sniffing) if remote images are enabled.
+                raise ValueError("Remote image host allowlist is empty; set REMOTE_IMAGE_HOST_ALLOWLIST to enable remote fetch")
+            if parsed.hostname not in host_allowlist:
                 raise ValueError("Remote image host not allowed")
 
             client = _get_http_client(timeout=remote_timeout)

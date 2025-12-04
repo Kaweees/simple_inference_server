@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from app.concurrency.limiter import MAX_CONCURRENT
-
 # Allow per-capability sizing; defaults are decoupled from the global limiter but still bounded >=1.
 EMBEDDING_MAX_WORKERS = max(1, int(os.getenv("EMBEDDING_MAX_WORKERS", "4")))
 CHAT_MAX_WORKERS = max(1, int(os.getenv("CHAT_MAX_WORKERS", "4")))

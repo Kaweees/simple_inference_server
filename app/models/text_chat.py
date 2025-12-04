@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import threading
 import os
 from collections.abc import Sequence
 from typing import Any, cast
@@ -36,6 +37,28 @@ class _StopOnTokens(StoppingCriteria):
                 self.triggered = True
                 return True
         return False
+
+
+class _StopOnCancel(StoppingCriteria):
+    """Stop generation when a cancellation event is set."""
+
+    def __init__(self, event: threading.Event) -> None:
+        super().__init__()
+        self.event = event
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any) -> bool:  # noqa: D401
+        return self.event.is_set()
+
+
+class _StopOnCancelAny(StoppingCriteria):
+    """Stop batched generation when any cancellation event is set."""
+
+    def __init__(self, events: list[threading.Event]) -> None:
+        super().__init__()
+        self.events = events
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any) -> bool:  # noqa: D401
+        return any(ev.is_set() for ev in self.events)
 
 
 class TextChatModel(ChatModel):
@@ -81,8 +104,9 @@ class TextChatModel(ChatModel):
         temperature: float,
         top_p: float,
         stop: list[str] | None = None,
+        cancel_event: threading.Event | None = None,
         ) -> ChatGeneration:
-        stop_criteria, stop_flag = self._build_stop_criteria(stop)
+        stop_criteria, stop_flag = self._build_stop_criteria(stop, cancel_event)
         prepared_inputs, prompt_len = self.prepare_inputs(messages, add_generation_prompt=True)
         inputs = self._move_to_device(prepared_inputs)
 
@@ -126,8 +150,9 @@ class TextChatModel(ChatModel):
         temperature: float,
         top_p: float,
         stop: list[str] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ChatGeneration:
-        stop_criteria, stop_flag = self._build_stop_criteria(stop)
+        stop_criteria, stop_flag = self._build_stop_criteria(stop, cancel_event)
         prompt_len = int(prepared.get("_prompt_len", prepared.get("input_ids").shape[1]))
         inputs = self._move_to_device({k: v for k, v in prepared.items() if k != "_prompt_len"})
 
@@ -171,9 +196,11 @@ class TextChatModel(ChatModel):
         temperature: float,
         top_p: float,
         stop: list[str] | None = None,
+        cancel_events: list[threading.Event] | None = None,
     ) -> list[ChatGeneration]:
         """Batched generation for compatible requests (shared decoding params)."""
         stop = stop or []
+        cancel_events = cancel_events or [None] * len(batch_messages)
         encodings = []
         prompt_lengths: list[int] = []
         for msgs in batch_messages:
@@ -193,6 +220,13 @@ class TextChatModel(ChatModel):
             "eos_token_id": self.tokenizer.eos_token_id,
             "use_cache": True,
         }
+        criteria: list[StoppingCriteria] = []
+        if stop:
+            criteria.append(_StopOnTokens([self.tokenizer.encode(s, add_special_tokens=False) for s in stop if s]))
+        if any(ev is not None for ev in cancel_events):
+            criteria.append(_StopOnCancelAny([ev for ev in cancel_events if ev is not None]))
+        if criteria:
+            gen_kwargs["stopping_criteria"] = StoppingCriteriaList(criteria)
 
         with torch.inference_mode():
             output_ids = self.model.generate(**inputs, **gen_kwargs)
@@ -225,8 +259,10 @@ class TextChatModel(ChatModel):
         temperature: float,
         top_p: float,
         stop: list[str] | None = None,
+        cancel_events: list[threading.Event] | None = None,
     ) -> list[ChatGeneration]:
         stop = stop or []
+        cancel_events = cancel_events or [None] * len(prepared_list)
         encodings = []
         prompt_lengths: list[int] = []
         for prepared in prepared_list:
@@ -245,6 +281,13 @@ class TextChatModel(ChatModel):
             "eos_token_id": self.tokenizer.eos_token_id,
             "use_cache": True,
         }
+        criteria: list[StoppingCriteria] = []
+        if stop:
+            criteria.append(_StopOnTokens([self.tokenizer.encode(s, add_special_tokens=False) for s in stop if s]))
+        if any(ev is not None for ev in cancel_events):
+            criteria.append(_StopOnCancelAny([ev for ev in cancel_events if ev is not None]))
+        if criteria:
+            gen_kwargs["stopping_criteria"] = StoppingCriteriaList(criteria)
 
         with torch.inference_mode():
             output_ids = self.model.generate(**inputs, **gen_kwargs)
@@ -333,15 +376,19 @@ class TextChatModel(ChatModel):
         return normalized, prompt_len
 
     def _build_stop_criteria(
-        self, stop: list[str] | None
+        self, stop: list[str] | None, cancel_event: threading.Event | None
     ) -> tuple[StoppingCriteriaList | None, _StopOnTokens | None]:
-        if not stop:
-            return None, None
-        stop_token_ids = [
-            self.tokenizer.encode(s, add_special_tokens=False) for s in stop if s
-        ]
-        stopper = _StopOnTokens(stop_token_ids)
-        return StoppingCriteriaList([stopper]), stopper
+        criteria: list[StoppingCriteria] = []
+        stopper = None
+        if stop:
+            stop_token_ids = [self.tokenizer.encode(s, add_special_tokens=False) for s in stop if s]
+            stopper = _StopOnTokens(stop_token_ids)
+            criteria.append(stopper)
+        if cancel_event is not None:
+            criteria.append(_StopOnCancel(cancel_event))
+        if not criteria:
+            return None, stopper
+        return StoppingCriteriaList(criteria), stopper
 
     @staticmethod
     def _trim_with_stop(text: str, stop: list[str] | None) -> tuple[str, bool]:

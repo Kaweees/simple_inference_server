@@ -9,8 +9,16 @@ from typing import Any
 import numpy as np
 
 from app.models.registry import ModelRegistry
-from app.threadpool import get_embedding_executor
 from app.monitoring.metrics import observe_embedding_batch_wait
+from app.threadpool import get_embedding_executor
+
+
+class EmbeddingBatchQueueFullError(Exception):
+    """Raised when the embedding batch queue is full."""
+
+
+class EmbeddingBatchQueueTimeoutError(Exception):
+    """Raised when waiting to enqueue into the embedding batch queue times out."""
 
 
 class _BatchItem:
@@ -21,13 +29,14 @@ class _BatchItem:
 
 
 class ModelBatcher:
-    def __init__(self, model: Any, max_batch: int, window_ms: float, queue_size: int) -> None:
+    def __init__(self, model: Any, max_batch: int, window_ms: float, queue_size: int, queue_timeout: float) -> None:
         self.model = model
         self.max_batch = max_batch
         self.window = max(window_ms / 1000.0, 0.0)
         # Bounded queue prevents unbounded memory growth under bursty load.
         self.queue: asyncio.Queue[_BatchItem] = asyncio.Queue(max(queue_size, 1))
         self._task: asyncio.Task[None] | None = None
+        self.queue_timeout = max(queue_timeout, 0.0)
 
     async def enqueue(self, texts: list[str]) -> np.ndarray:
         loop = asyncio.get_running_loop()
@@ -36,7 +45,12 @@ class ModelBatcher:
             self._task = loop.create_task(self._worker())
 
         fut: asyncio.Future[np.ndarray] = loop.create_future()
-        await self.queue.put(_BatchItem(texts, fut))
+        try:
+            await asyncio.wait_for(self.queue.put(_BatchItem(texts, fut)), timeout=self.queue_timeout)
+        except TimeoutError as exc:
+            raise EmbeddingBatchQueueTimeoutError("Embedding batch queue wait exceeded") from exc
+        except asyncio.QueueFull as exc:
+            raise EmbeddingBatchQueueFullError("Embedding batch queue is full") from exc
         return await fut
 
     async def _worker(self) -> None:
@@ -81,10 +95,8 @@ class ModelBatcher:
             # Split outputs per request
             offset = 0
             for bi, size in zip(batch_items, sizes, strict=False):
-                try:
+                with contextlib.suppress(Exception):
                     observe_embedding_batch_wait(getattr(self.model, "name", "unknown"), loop.time() - bi.enqueue_time)
-                except Exception:
-                    pass
                 if not bi.future.done():
                     bi.future.set_result(vectors[offset : offset + size])
                 offset += size
@@ -101,13 +113,14 @@ class ModelBatcher:
 
 
 class BatchingService:
-    def __init__(
+    def __init__(  # noqa: PLR0913 - config-rich initializer
         self,
         registry: ModelRegistry,
         enabled: bool = True,
         max_batch_size: int | None = None,
         window_ms: float | None = None,
         queue_size: int | None = None,
+        queue_timeout_sec: float | None = None,
     ) -> None:
         self.enabled = enabled
         self.max_batch_size = max_batch_size or int(
@@ -116,6 +129,9 @@ class BatchingService:
         self.window_ms = window_ms if window_ms is not None else float(os.getenv("BATCH_WINDOW_MS", "6"))
         self.queue_size = queue_size if queue_size is not None else int(
             os.getenv("EMBEDDING_BATCH_QUEUE_SIZE", os.getenv("BATCH_QUEUE_SIZE", os.getenv("MAX_QUEUE_SIZE", "64")))
+        )
+        self.queue_timeout_sec = queue_timeout_sec if queue_timeout_sec is not None else float(
+            os.getenv("EMBEDDING_BATCH_QUEUE_TIMEOUT_SEC", os.getenv("QUEUE_TIMEOUT_SEC", "2.0"))
         )
         self._batchers: dict[str, ModelBatcher] = {}
         for name in registry.list_models():
@@ -126,6 +142,7 @@ class BatchingService:
                     self.max_batch_size,
                     self.window_ms,
                     self.queue_size,
+                    self.queue_timeout_sec,
                 )
 
     async def enqueue(self, model_name: str, texts: list[str]) -> np.ndarray:

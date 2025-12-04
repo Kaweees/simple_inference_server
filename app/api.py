@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -22,25 +23,28 @@ from fastapi import (
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
-from app.chat_batching import ChatBatchQueueFullError
-from app.chat_batching import ChatBatchQueueTimeoutError
+from app.batching import (
+    EmbeddingBatchQueueFullError,
+    EmbeddingBatchQueueTimeoutError,
+)
+from app.chat_batching import ChatBatchQueueFullError, ChatBatchQueueTimeoutError
 from app.concurrency.audio_limiter import (
     QUEUE_TIMEOUT_SEC as AUDIO_QUEUE_TIMEOUT_SEC,
     AudioQueueFullError,
     AudioQueueTimeoutError,
     AudioShuttingDownError,
+    limiter as audio_limiter,
     reset_queue_label as reset_audio_queue_label,
     set_queue_label as set_audio_queue_label,
-    limiter as audio_limiter,
 )
 from app.concurrency.limiter import (
     QUEUE_TIMEOUT_SEC,
     QueueFullError,
     QueueTimeoutError,
     ShuttingDownError,
+    limiter,
     reset_queue_label,
     set_queue_label,
-    limiter,
 )
 from app.dependencies import get_model_registry
 from app.models.base import ChatGeneration
@@ -278,6 +282,19 @@ def _get_chat_lock(model: str) -> asyncio.Lock:
     return lock
 
 
+async def _cancel_on_disconnect(request: Request, event: threading.Event) -> None:
+    """Set cancel event if client disconnects."""
+
+    try:
+        while True:
+            if await request.is_disconnected():
+                event.set()
+                return
+            await asyncio.sleep(0.05)
+    except Exception:
+        return
+
+
 def _format_ts(seconds: float, *, sep: str = ",") -> str:
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
@@ -346,7 +363,7 @@ class HealthResponse(BaseModel):
 
 
 @router.post("/v1/embeddings", response_model=EmbeddingResponse)
-async def create_embeddings(
+async def create_embeddings(  # noqa: PLR0912, PLR0915
     req: EmbeddingRequest,
     registry: Annotated[ModelRegistry, Depends(get_model_registry)],
     request: Request,
@@ -394,6 +411,13 @@ async def create_embeddings(
                     loop = asyncio.get_running_loop()
                     executor = get_embedding_executor()
                     vectors = await loop.run_in_executor(executor, model.embed, texts)
+            except (EmbeddingBatchQueueFullError, EmbeddingBatchQueueTimeoutError) as exc:
+                record_request(req.model, "429")
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Embedding batch queue wait exceeded" if isinstance(exc, EmbeddingBatchQueueTimeoutError) else "Embedding batch queue full",
+                    headers={"Retry-After": str(int(QUEUE_TIMEOUT_SEC))},
+                ) from exc
             except Exception as exc:  # pragma: no cover - unexpected runtime failure
                 record_request(req.model, "500")
                 logger.exception(
@@ -448,7 +472,8 @@ async def create_embeddings(
         EmbeddingObject(index=i, embedding=vec.tolist()) for i, vec in enumerate(vectors)
     ]
     try:
-        prompt_tokens = model.count_tokens(texts)
+        loop = asyncio.get_running_loop()
+        prompt_tokens = await loop.run_in_executor(get_embedding_executor(), lambda: model.count_tokens(texts))
     except Exception:
         prompt_tokens = 0
     usage = Usage(prompt_tokens=prompt_tokens, total_tokens=prompt_tokens, completion_tokens=None)
@@ -478,6 +503,7 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
 
     start = time.perf_counter()
     label_token = set_queue_label(req.model or "chat")
+    disconnect_task: asyncio.Task[None] | None = None
     try:
         async with limiter():
             try:
@@ -528,6 +554,9 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
                     detail=f"Prompt too long; max {max_prompt_tokens} tokens",
                 )
             generation: ChatGeneration | None = None
+            cancel_event = threading.Event()
+            disconnect_task = asyncio.create_task(_cancel_on_disconnect(_request, cancel_event))
+            gen_timeout = float(os.getenv("CHAT_GENERATE_TIMEOUT_SEC", "60"))
             batcher = getattr(_request.app.state, "chat_batching_service", None)
             if (
                 batcher is not None
@@ -544,6 +573,7 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
                         stop=stop,
                         prompt_tokens=prompt_tokens,
                         prepared_inputs=prepared_inputs,
+                        cancel_event=cancel_event,
                     )
                 except ValueError as exc:
                     record_chat_request(req.model, "400")
@@ -579,31 +609,46 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
                     generation = None
 
             if generation is None:
+                async def _run_generation() -> ChatGeneration:
+                    if prepared_inputs is not None and hasattr(model, "generate_prepared"):
+                        return await loop.run_in_executor(
+                            executor,
+                            lambda: model.generate_prepared(
+                                prepared_inputs,
+                                max_new_tokens=max_tokens,
+                                temperature=temperature,
+                                top_p=top_p,
+                                stop=stop,
+                                cancel_event=cancel_event,
+                            ),
+                        )
+
+                    return await loop.run_in_executor(
+                        executor,
+                        lambda: model.generate(
+                            raw_messages,
+                            max_new_tokens=max_tokens,
+                            temperature=temperature,
+                            top_p=top_p,
+                            stop=stop,
+                            cancel_event=cancel_event,
+                        ),
+                    )
+
                 try:
-                    lock = _get_chat_lock(req.model)
-                    async with lock:
-                        if prepared_inputs is not None and hasattr(model, "generate_prepared"):
-                            generation = await loop.run_in_executor(
-                                executor,
-                                lambda: model.generate_prepared(
-                                    prepared_inputs,
-                                    max_new_tokens=max_tokens,
-                                    temperature=temperature,
-                                    top_p=top_p,
-                                    stop=stop,
-                                ),
-                            )
-                        else:
-                            generation = await loop.run_in_executor(
-                                executor,
-                                lambda: model.generate(
-                                    raw_messages,
-                                    max_new_tokens=max_tokens,
-                                    temperature=temperature,
-                                    top_p=top_p,
-                                    stop=stop,
-                                ),
-                            )
+                    if getattr(model, "thread_safe", True):
+                        generation = await asyncio.wait_for(_run_generation(), timeout=gen_timeout)
+                    else:
+                        lock = _get_chat_lock(req.model)
+                        async with lock:
+                            generation = await asyncio.wait_for(_run_generation(), timeout=gen_timeout)
+                except TimeoutError as exc:
+                    cancel_event.set()
+                    record_chat_request(req.model, "504")
+                    raise HTTPException(
+                        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                        detail="Chat generation timed out",
+                    ) from exc
                 except Exception as exc:  # pragma: no cover - unexpected runtime failure
                     record_chat_request(req.model, "500")
                     logger.exception(
@@ -620,6 +665,7 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Chat generation failed",
                 )
+            disconnect_task.cancel()
     except QueueFullError as exc:
         record_chat_request(req.model, "429")
         raise HTTPException(
@@ -642,6 +688,8 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
         ) from exc
     finally:
         reset_queue_label(label_token)
+        if disconnect_task is not None:
+            disconnect_task.cancel()
 
     latency = time.perf_counter() - start
     observe_chat_latency(req.model, latency)
@@ -715,7 +763,9 @@ async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
 
     try:
         temp_path, size_bytes = await _save_upload(file)
-        duration = _probe_duration(temp_path)
+        loop = asyncio.get_running_loop()
+        executor = get_audio_executor()
+        duration = await loop.run_in_executor(executor, lambda: _probe_duration(temp_path))
 
         async with audio_limiter():
             try:
@@ -732,8 +782,6 @@ async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
                     detail=f"Model {model_name} does not support audio transcription",
                 )
 
-            loop = asyncio.get_running_loop()
-            executor = get_audio_executor()
             try:
                 result = await loop.run_in_executor(
                     executor,
