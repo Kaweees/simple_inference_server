@@ -30,6 +30,7 @@ from app.concurrency.limiter import (
     ShuttingDownError,
     limiter,
 )
+from app.chat_batching import ChatBatchQueueFullError
 from app.dependencies import get_model_registry
 from app.models.base import ChatGeneration
 from app.models.registry import ModelRegistry
@@ -451,9 +452,11 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=str(exc),
                     ) from exc
-                except RuntimeError as exc:
-                    # Chat batch queue is full
+                except ChatBatchQueueFullError as exc:
                     record_chat_request(req.model, "429")
+                    logger.info(
+                        "chat_batch_queue_full", extra={"model": req.model, "status": 429}
+                    )
                     raise HTTPException(
                         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                         detail="Chat batch queue full",
