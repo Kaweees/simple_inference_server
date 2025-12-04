@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, Protocol, TypeGuard, cast, runtime_checkable
 
 import torch
 from PIL import Image
@@ -21,7 +21,8 @@ from app.threadpool import get_embedding_executor
 
 logger = logging.getLogger(__name__)
 
-DeviceLike = torch.device | str | int | None
+type DeviceLike = torch.device | str | int | None
+type CudaDeviceLike = torch.device | str
 
 _failed_models: set[str] = set()
 
@@ -293,7 +294,7 @@ def _available_vram_mb(device: DeviceLike) -> float:
         return 0.0
 
 
-def _is_cuda_device(device: DeviceLike) -> bool:
+def _is_cuda_device(device: DeviceLike) -> TypeGuard[CudaDeviceLike]:
     if not torch.cuda.is_available():
         return False
     if isinstance(device, torch.device):
