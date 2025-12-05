@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    models_env = args.models or os.getenv("MODELS") or os.getenv("MODEL_NAMES")
+    models_env = args.models or os.getenv("MODELS")
     if not models_env:
         raise SystemExit("No models specified. Set --models or MODELS env (comma-separated).")
     os.environ["MODEL_CONFIG"] = args.config

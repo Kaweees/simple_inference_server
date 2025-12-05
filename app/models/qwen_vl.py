@@ -82,8 +82,10 @@ class QwenVLChat(ChatModel):
         self.capabilities = ["chat-completion", "vision"]
         self.device = self._resolve_runtime_device(device)
         self.hf_repo_id = hf_repo_id
+        # Generation is serialized via _gen_lock so a single handler instance
+        # is safe even when the shared chat executor has >1 workers.
         self._gen_lock = threading.Lock()
-        self.thread_safe = True
+        self.thread_safe = False
         models_dir = Path(__file__).resolve().parent.parent.parent / "models"
         self.cache_dir = str(models_dir) if models_dir.exists() else os.environ.get("HF_HOME")
 

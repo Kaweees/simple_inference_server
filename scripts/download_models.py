@@ -7,7 +7,7 @@ import yaml
 from huggingface_hub import snapshot_download
 
 CONFIG_PATH = os.getenv("MODEL_CONFIG", "configs/model_config.yaml")
-MODELS = os.getenv("MODELS") or os.getenv("MODEL_NAMES")  # MODEL_NAMES kept for backward compat
+MODELS = os.getenv("MODELS")
 # Hard lock cache to repo-local models directory to ensure Docker COPY works.
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "models"
 

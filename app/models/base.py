@@ -10,6 +10,19 @@ if TYPE_CHECKING:
     import torch
 
 
+# NOTE FOR HANDLER AUTHORS:
+# -------------------------
+# Handlers may optionally expose a boolean `thread_safe` attribute. When present,
+# it is interpreted as:
+#   - True: the handler is safe to call concurrently from up to *_MAX_WORKERS
+#     threads on the shared executor for its capability (embedding/chat/vision/
+#     audio) without additional locking at the call site.
+#   - False: the handler should internally serialize access to any shared state
+#     (e.g., tokenizers, pipelines, HTTP clients) via its own locks. The server
+#     will continue to use the shared executors but may log warnings when the
+#     worker count for that capability is >1 to highlight potential inefficiency.
+
+
 class EmbeddingModel(Protocol):
     name: str
     dim: int
@@ -112,3 +125,33 @@ class SpeechModel(Protocol):
         timestamp_granularity: Literal["word", "segment", None],
         cancel_event: threading.Event | None = None,
     ) -> SpeechResult: ...
+
+
+# TODO: future extension points for rerank and intent models. These are not used
+# yet but provide a clear contract so that future handlers can plug into the
+# server with the same style as EmbeddingModel / ChatModel / SpeechModel.
+
+
+class RerankModel(Protocol):
+    name: str
+    device: str | torch.device
+    capabilities: list[str]
+
+    def rerank(
+        self,
+        query: str,
+        documents: Sequence[str],
+        *,
+        top_k: int | None = None,
+    ) -> list[int]: ...
+
+
+class IntentModel(Protocol):
+    name: str
+    device: str | torch.device
+    capabilities: list[str]
+
+    def classify_intent(
+        self,
+        text: str,
+    ) -> dict[str, Any]: ...

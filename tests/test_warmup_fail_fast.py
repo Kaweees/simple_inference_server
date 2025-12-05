@@ -36,7 +36,6 @@ models:
     monkeypatch.setenv("MODEL_CONFIG", str(cfg))
     monkeypatch.setenv("MODELS", "fail/repo")
     monkeypatch.setenv("ENABLE_WARMUP", "1")
-    monkeypatch.setenv("WARMUP_FAIL_FAST", "1")
 
     # stub download to no-op
     monkeypatch.setattr(main, "snapshot_download", lambda **kwargs: None)

@@ -27,6 +27,7 @@ from app.threadpool import get_chat_executor
 
 logger = logging.getLogger(__name__)
 _COUNT_EXECUTOR_REF: dict[str, ThreadPoolExecutor | None] = {"value": None}
+_COUNT_EXECUTOR_LOCK = threading.Lock()
 _REQUEUE_RETRIES = max(0, int(os.getenv("CHAT_REQUEUE_RETRIES", "3")))
 _REQUEUE_BASE_DELAY_SEC = max(0.001, float(os.getenv("CHAT_REQUEUE_BASE_DELAY_MS", "5")) / 1000.0)
 _REQUEUE_MAX_DELAY_SEC = float(os.getenv("CHAT_REQUEUE_MAX_DELAY_MS", "100")) / 1000.0
@@ -404,15 +405,16 @@ def _get_count_executor(*, use_chat_executor: bool) -> ThreadPoolExecutor:
         record_chat_count_pool_size(workers)
         return executor
 
-    cached_executor: ThreadPoolExecutor | None = _COUNT_EXECUTOR_REF.get("value")
-    if cached_executor is None:
-        workers = max(1, int(os.getenv("CHAT_COUNT_MAX_WORKERS", "2")))
-        count_executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chat-count")
-        _COUNT_EXECUTOR_REF["value"] = count_executor
-        record_chat_count_pool_size(workers)
-        return count_executor
-    record_chat_count_pool_size(max(1, getattr(cached_executor, "_max_workers", 1)))
-    return cached_executor
+    with _COUNT_EXECUTOR_LOCK:
+        cached_executor: ThreadPoolExecutor | None = _COUNT_EXECUTOR_REF.get("value")
+        if cached_executor is None:
+            workers = max(1, int(os.getenv("CHAT_COUNT_MAX_WORKERS", "2")))
+            count_executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chat-count")
+            _COUNT_EXECUTOR_REF["value"] = count_executor
+            record_chat_count_pool_size(workers)
+            return count_executor
+        record_chat_count_pool_size(max(1, getattr(cached_executor, "_max_workers", 1)))
+        return cached_executor
 
 
 def get_count_executor(*, use_chat_executor: bool = False) -> ThreadPoolExecutor:

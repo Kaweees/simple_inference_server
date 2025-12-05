@@ -28,6 +28,11 @@ from app.threadpool import (
     CHAT_MAX_WORKERS,
     EMBEDDING_MAX_WORKERS,
     VISION_MAX_WORKERS,
+    get_audio_executor,
+    get_chat_executor,
+    get_embedding_count_executor,
+    get_embedding_executor,
+    get_vision_executor,
     shutdown_executors,
 )
 from app.warmup import warm_up_models
@@ -44,7 +49,7 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:  # 
 
     config_path = os.getenv("MODEL_CONFIG", "configs/model_config.yaml")
     device_override = os.getenv("MODEL_DEVICE") or None
-    models_env = os.getenv("MODELS") or os.getenv("MODEL_NAMES")  # MODEL_NAMES kept for backward compat
+    models_env = os.getenv("MODELS")
     model_allowlist = [m.strip() for m in (models_env or "").split(",") if m.strip()] or None
     if model_allowlist is None:
         raise SystemExit(
@@ -101,6 +106,14 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:  # 
     state.batching_service = batching_service
     state.chat_batching_service = chat_batching_service
 
+    # Eagerly initialize shared executors so thread pools and their worker counts
+    # are fixed during startup and visible in the runtime configuration snapshot.
+    embedding_executor = get_embedding_executor()
+    embedding_count_executor = get_embedding_count_executor()
+    chat_executor = get_chat_executor()
+    vision_executor = get_vision_executor()
+    audio_executor = get_audio_executor()
+
     runtime_cfg = {
         "model_config": config_path,
         "model_device": device_override or "auto",
@@ -108,6 +121,15 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:  # 
         "max_concurrent": limiter.MAX_CONCURRENT,
         "max_queue_size": limiter.MAX_QUEUE_SIZE,
         "queue_timeout_sec": limiter.QUEUE_TIMEOUT_SEC,
+        "embedding_max_workers": getattr(embedding_executor, "_max_workers", EMBEDDING_MAX_WORKERS),
+        "embedding_count_max_workers": getattr(
+            embedding_count_executor,
+            "_max_workers",
+            None,
+        ),
+        "chat_max_workers": getattr(chat_executor, "_max_workers", CHAT_MAX_WORKERS),
+        "vision_max_workers": getattr(vision_executor, "_max_workers", VISION_MAX_WORKERS),
+        "audio_max_workers": getattr(audio_executor, "_max_workers", AUDIO_MAX_WORKERS),
         "max_batch_size": int(os.getenv("MAX_BATCH_SIZE", "32")),
         "max_text_chars": int(os.getenv("MAX_TEXT_CHARS", "20000")),
         "enable_batching": batching_enabled,
@@ -120,12 +142,47 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:  # 
         "chat_max_prompt_tokens": chat_max_prompt_tokens,
         "chat_max_new_tokens": chat_max_new_tokens,
         "chat_batch_queue_size": chat_batch_queue_size,
+        "chat_queue_max_wait_ms": float(os.getenv("CHAT_QUEUE_MAX_WAIT_MS", "2000")),
+        "chat_requeue_max_wait_ms": float(os.getenv("CHAT_REQUEUE_MAX_WAIT_MS", "2000")),
+        "chat_requeue_max_tasks": int(os.getenv("CHAT_REQUEUE_MAX_TASKS", "64")),
         "audio_max_concurrent": audio_limits.MAX_CONCURRENT,
         "audio_max_queue_size": audio_limits.MAX_QUEUE_SIZE,
         "audio_queue_timeout_sec": audio_limits.QUEUE_TIMEOUT_SEC,
         "embedding_generate_timeout_sec": float(os.getenv("EMBEDDING_GENERATE_TIMEOUT_SEC", "60")),
         "audio_process_timeout_sec": float(os.getenv("AUDIO_PROCESS_TIMEOUT_SEC", "180")),
     }
+    # Log when audio concurrency/queue defaults are derived from global settings
+    # rather than explicit AUDIO_* overrides, for easier ops debugging.
+    if "AUDIO_MAX_CONCURRENT" not in os.environ and audio_limits.MAX_CONCURRENT == limiter.MAX_CONCURRENT:
+        logger.debug(
+            "audio_max_concurrent_derived_from_global",
+            extra={
+                "audio_max_concurrent": audio_limits.MAX_CONCURRENT,
+                "max_concurrent": limiter.MAX_CONCURRENT,
+            },
+        )
+    if (
+        "AUDIO_MAX_QUEUE_SIZE" not in os.environ
+        and audio_limits.MAX_QUEUE_SIZE == limiter.MAX_QUEUE_SIZE
+    ):
+        logger.debug(
+            "audio_max_queue_size_derived_from_global",
+            extra={
+                "audio_max_queue_size": audio_limits.MAX_QUEUE_SIZE,
+                "max_queue_size": limiter.MAX_QUEUE_SIZE,
+            },
+        )
+    if (
+        "AUDIO_QUEUE_TIMEOUT_SEC" not in os.environ
+        and audio_limits.QUEUE_TIMEOUT_SEC == limiter.QUEUE_TIMEOUT_SEC
+    ):
+        logger.debug(
+            "audio_queue_timeout_sec_derived_from_global",
+            extra={
+                "audio_queue_timeout_sec": audio_limits.QUEUE_TIMEOUT_SEC,
+                "queue_timeout_sec": limiter.QUEUE_TIMEOUT_SEC,
+            },
+        )
     logger.info(
         "Loaded models",
         extra={
@@ -137,18 +194,16 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:  # 
     logger.info("runtime_config", extra=runtime_cfg)
 
     warmup_required = os.getenv("ENABLE_WARMUP", "1") != "0"
-    # Backward compatible: WARMUP_FAIL_FAST overrides REQUIRE_WARMUP_SUCCESS (default on).
-    require_warmup_success = os.getenv(
-        "WARMUP_FAIL_FAST",
-        os.getenv("REQUIRE_WARMUP_SUCCESS", "1"),
-    ) != "0"
     warmup_failures: list[str] = []
     warmup_completed = not warmup_required
     if warmup_required:
         warmup_failures = warm_up_models(registry)
         warmup_completed = True
-        if require_warmup_success and warmup_failures:
+        if warmup_failures:
             failed_list = ", ".join(sorted(warmup_failures))
+            # Fail-fast is the only behavior when warmup is enabled: if startup
+            # cannot successfully exercise the loaded models, serving traffic is
+            # likely to fail as well.
             raise SystemExit(f"Warmup failed for model(s): {failed_list}")
 
     failed_set = set(warmup_failures)
