@@ -224,7 +224,7 @@ def _warn_thread_unsafe_models(registry: ModelRegistry) -> None:
             )
 
 
-def _build_runtime_config(
+def _build_runtime_config(  # noqa: PLR0913
     *,
     config_path: str,
     device_override: str | None,
