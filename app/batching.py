@@ -70,9 +70,6 @@ class ModelBatcher:
                 remaining = self.window - (time.perf_counter() - start)
                 if remaining <= 0:
                     break
-                # If there is no backlog, don't hold the first request just to wait out the window.
-                if self.queue.empty():
-                    break
                 try:
                     nxt = await asyncio.wait_for(self.queue.get(), timeout=remaining)
                 except TimeoutError:

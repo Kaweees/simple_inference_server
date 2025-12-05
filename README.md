@@ -24,6 +24,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
   - Whisper via faster-whisper/CT2 for lower latency.
   - Chat via vLLM/TGI/llama.cpp backends while keeping the same `ChatModel` interface.
   - Embeddings via ONNX/TensorRT (e.g., bge, gemma) to cut CPU/GPU latency.
+- Optional non-PyTorch backends for embeddings / intent / rerank models (e.g., ONNX or C++ runtimes) that plug into the existing `EmbeddingModel`-style handlers without adding hard dependencies to the core server.
 - Chat continuous batching phase 2: streaming + user abort (phase 1 is in place; ideas recorded in `docs/continuous_batching.md`).
 - Deepen cancellation support: propagate cancel signals into backend kernels (e.g., vLLM/TGI/llama.cpp/faster-whisper) once their APIs expose cooperative interrupts.
 - Add optional remote inference handler (HTTP/gRPC) implementing the same protocols for easy swapping.
@@ -214,7 +215,7 @@ MODELS=BAAI/bge-m3 uv run python scripts/run_dev.py --device auto
 
 Default model cache is locked to the repo-local `models/` directory. Pre-download models via `scripts/download_models.py` (always writes to `models/`) before building or running the service. For private/licensed models, set `HF_TOKEN` only when running the download script; the runtime uses local files only.
 
-Environment variables can be kept in a `.env` file (see `.env.example`) and are loaded on startup without overriding existing variables. Startup performs an optional warmup for each model (toggle via `ENABLE_WARMUP`, default on): it runs a batch through every executor worker across supported capabilities (embeddings, chat, vision, audio) to initialize per-thread tokenizers/pipelines and compile kernels.
+Environment variables can be kept in a `.env` file (see `.env.example`) and are loaded on startup without overriding existing variables. The example file ships with a conservative `MODEL_DEVICE=auto` + single-GPU friendly concurrency profile; for best results you should tune `MAX_CONCURRENT`, per-capability `*_MAX_WORKERS`, and batching windows based on your actual hardware (CUDA, MPS, or CPU-only). Startup performs an optional warmup for each model (toggle via `ENABLE_WARMUP`, default on): it runs a batch through every executor worker across supported capabilities (embeddings, chat, vision, audio) to initialize per-thread tokenizers/pipelines and compile kernels.
 
 Warmup controls:
 - `WARMUP_BATCH_SIZE` / `WARMUP_STEPS`: adjust batch and repetitions.
@@ -229,7 +230,7 @@ Embedding cache: repeated inputs are served from an in-memory LRU keyed by the f
 
 ## Performance tuning (quick checklist)
 
-- **Concurrency gate**: `MAX_CONCURRENT` caps in-flight forwards and also sets threadpool size. On a single GPU/MPS start with 1–2; raise only if throughput improves while p99 stays acceptable.
+- **Concurrency gate**: `MAX_CONCURRENT` caps how many requests may run model forwards at once via the global limiter. Per-capability worker counts (`EMBEDDING_MAX_WORKERS`, `CHAT_MAX_WORKERS`, `VISION_MAX_WORKERS`, `AUDIO_MAX_WORKERS`) size the underlying thread pools but do **not** bypass the limiter. For most deployments, keep each `*_MAX_WORKERS` ≤ `MAX_CONCURRENT` to avoid oversubscribing CPU/GPU threads; on a single GPU/MPS start with `MAX_CONCURRENT=1–2` and small worker pools, and only raise them if throughput improves while p99 stays acceptable.
 - **Micro-batching**: keep `ENABLE_BATCHING=1`; tune `BATCH_WINDOW_MS` (e.g., 4–10 ms; default `6` ms) and `BATCH_WINDOW_MAX_SIZE` (8–16) to trade a few ms of queueing for higher throughput. Set `BATCH_WINDOW_MS=0` to disable coalescing.
 - **Chat batching (text-only)**: `ENABLE_CHAT_BATCHING=1` by default; tune `CHAT_BATCH_WINDOW_MS` (e.g., 4–10 ms) and `CHAT_BATCH_MAX_SIZE` (4–8). Guards: `CHAT_MAX_PROMPT_TOKENS` (default 4096) and `CHAT_MAX_NEW_TOKENS` (default 2048). Vision models stay on the legacy path unless `CHAT_BATCH_ALLOW_VISION=1`.
 - **Chat token counting**: defaults to a dedicated pool (`CHAT_COUNT_USE_CHAT_EXECUTOR=0`). Flip to `1` only if you want counting to share chat worker threads and can tolerate possible head-of-line blocking.

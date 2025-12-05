@@ -53,6 +53,15 @@ uv run python scripts/run_dev.py --device auto
 
 ---
 
+### 并发模型快速说明
+
+- 全局限流：`MAX_CONCURRENT` + `MAX_QUEUE_SIZE` 通过 limiter 控制**最多有多少请求同时在执行模型前向**以及队列长度，防止无界排队。
+- 线程池大小：`EMBEDDING_MAX_WORKERS`、`CHAT_MAX_WORKERS`、`VISION_MAX_WORKERS`、`AUDIO_MAX_WORKERS` 只决定各自 `ThreadPoolExecutor` 的线程数，本身不会绕过 limiter。
+- 推荐做法：
+  - 大多数场景下令 `*_MAX_WORKERS <= MAX_CONCURRENT`，避免在设备上过度抢占 CPU/GPU 线程。
+  - 单机单卡：可以先从 `MAX_CONCURRENT=1` 或 `2` + 小线程池开始，通过调 `BATCH_WINDOW_MS` / `CHAT_BATCH_WINDOW_MS` 提升吞吐，而不是一味加并发。
+  - 音频路径：`AUDIO_MAX_CONCURRENT` 单独控制 Whisper 的并发度，通常建议小于或等于 `MAX_CONCURRENT`，避免音频任务拖慢 embeddings/chat。
+
 ## 压测场景设计
 
 ### 1. Embeddings 压测（高 QPS 高频调用的核心路径）
