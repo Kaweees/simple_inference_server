@@ -32,7 +32,12 @@ _queue: asyncio.Queue[int] = asyncio.Queue(MAX_QUEUE_SIZE)
 _state = {"accepting": True}
 _in_flight_state = {"count": 0}
 _in_flight_lock = asyncio.Lock()
-_queue_label: contextvars.ContextVar[str] = contextvars.ContextVar("audio_queue_label", default="audio")
+# Use a distinct sentinel so that "audio" can be a legitimate fallback label
+# (for requests without a concrete model name) without triggering warnings.
+_queue_label: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "audio_queue_label",
+    default="audio_unset",
+)
 
 
 async def _change_in_flight(delta: int) -> None:
@@ -57,7 +62,7 @@ async def limiter() -> AsyncIterator[None]:
         raise AudioShuttingDownError("Service is shutting down")
     queued = False
     label = _queue_label.get()
-    if label == "audio":
+    if label == "audio_unset":
         AUDIO_GENERIC_LABEL_WARN.inc()
     try:
         _queue.put_nowait(1)
