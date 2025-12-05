@@ -69,7 +69,11 @@ class HFEmbeddingModel(EmbeddingModel):
         return vectors
 
     def count_tokens(self, texts: list[str]) -> int:
-        # token counting uses tokenizer on CPU; no gradient required
+        # Token counting uses the tokenizer on CPU; no gradient required. Note
+        # that encoding and counting currently run in different executors, so
+        # any future caching between _encode() and count_tokens() must take
+        # care to remain thread-safe and ideally co-locate work in the same
+        # worker to avoid cross-thread state.
         tokenized = self._get_tokenizer()(texts, add_special_tokens=True)
         return sum(len(ids) for ids in tokenized["input_ids"])
 

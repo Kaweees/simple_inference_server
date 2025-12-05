@@ -192,11 +192,25 @@ class ChatBatcher:
                     for bi in batch_items:
                         if now - bi.enqueue_time > _QUEUE_MAX_WAIT_SEC:
                             if not bi.future.done():
-                                bi.future.set_exception(ChatBatchQueueTimeoutError("Chat batch queue wait exceeded"))
+                                bi.future.set_exception(
+                                    ChatBatchQueueTimeoutError("Chat batch queue wait exceeded")
+                                )
                             record_chat_batch_queue_rejection(self.model_name)
                         else:
                             alive_items.append(bi)
                     if not alive_items:
+                        oldest_wait = max(now - bi.enqueue_time for bi in batch_items)
+                        logger.warning(
+                            "chat_batch_items_dropped_due_to_queue_wait",
+                            extra={
+                                "model": self.model_name,
+                                "dropped": len(batch_items),
+                                "queue_size": pending_size,
+                                "max_queue_size": self.queue.maxsize,
+                                "queue_max_wait_sec": _QUEUE_MAX_WAIT_SEC,
+                                "oldest_wait_sec": oldest_wait,
+                            },
+                        )
                         continue
                     batch_items = alive_items
 
@@ -325,6 +339,15 @@ class ChatBatcher:
             if not item.future.done():
                 item.future.set_exception(ChatBatchQueueTimeoutError("Chat batch queue deadline exceeded"))
             record_chat_batch_queue_rejection(self.model_name)
+            logger.warning(
+                "chat_batch_requeue_deadline_exceeded",
+                extra={
+                    "model": self.model_name,
+                    "queue_size": self.queue.qsize(),
+                    "max_queue_size": self.queue.maxsize,
+                    "requeue_max_wait_sec": _REQUEUE_MAX_WAIT_SEC,
+                },
+            )
             return
 
         try:
@@ -339,6 +362,16 @@ class ChatBatcher:
             if not item.future.done():
                 item.future.set_exception(ChatBatchQueueTimeoutError("Chat batch requeue backlog exceeded"))
             record_chat_batch_queue_rejection(self.model_name)
+            logger.warning(
+                "chat_batch_requeue_backlog_exceeded",
+                extra={
+                    "model": self.model_name,
+                    "queue_size": self.queue.qsize(),
+                    "max_queue_size": self.queue.maxsize,
+                    "requeue_tasks": len(self._requeue_tasks),
+                    "requeue_max_tasks": _REQUEUE_MAX_TASKS,
+                },
+            )
             return
 
         async def _retry() -> None:
@@ -365,6 +398,16 @@ class ChatBatcher:
             if not item.future.done():
                 item.future.set_exception(ChatBatchQueueTimeoutError("Chat batch queue full"))
             record_chat_batch_queue_rejection(self.model_name)
+            logger.warning(
+                "chat_batch_requeue_timeout",
+                extra={
+                    "model": self.model_name,
+                    "queue_size": self.queue.qsize(),
+                    "max_queue_size": self.queue.maxsize,
+                    "requeue_max_wait_sec": _REQUEUE_MAX_WAIT_SEC,
+                    "waited_sec": (loop.time() - item.enqueue_time),
+                },
+            )
             return
 
         task = asyncio.create_task(_retry())

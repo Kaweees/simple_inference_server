@@ -464,10 +464,19 @@ def _get_http_client(*, timeout: float) -> httpx.Client:
 
     with _HTTP_CLIENT_LOCK:
         if _HTTP_CLIENT is None:
+            limits = httpx.Limits(max_keepalive_connections=8, max_connections=16)
             _HTTP_CLIENT = httpx.Client(
                 timeout=timeout,
-                limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
+                limits=limits,
                 follow_redirects=True,
+            )
+            logger.info(
+                "qwen_vl_http_client_created",
+                extra={
+                    "timeout": timeout,
+                    "max_keepalive_connections": limits.max_keepalive_connections,
+                    "max_connections": limits.max_connections,
+                },
             )
             atexit.register(_HTTP_CLIENT.close)
         return _HTTP_CLIENT

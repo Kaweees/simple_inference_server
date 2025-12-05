@@ -76,7 +76,6 @@ class Generates(Protocol):
 
 
 @runtime_checkable
-@runtime_checkable
 class Embeds(Protocol):
     name: str
     device: DeviceLike
@@ -205,87 +204,26 @@ def _warmup_embedding_model(model: object, device: DeviceLike, config: WarmupCon
 
     executor = _executor_for_capability("text-embedding", config)
     typed_model = cast(EmbeddingModel, model)
-    workers = _executor_workers(executor)
-    allowed_workers = _select_worker_count(
-        device=device,
-        executor_workers=workers,
-        per_worker_vram_mb=config.per_worker_vram_mb,
-        vram_budget_mb=config.vram_budget_mb,
-    )
 
-    current_batch = config.batch_size
-    current_workers = allowed_workers
-
-    for step in range(config.steps):
-        step_complete = False
-        while not step_complete:
-            start = time.perf_counter()
-            try:
-                _run_warmup_step(
-                    model=typed_model,
-                    texts=config.texts[: current_batch],
-                    workers=current_workers,
-                    use_inference_mode=config.use_inference_mode,
-                    executor=executor,
-                )
-                if _should_sync(device):
-                    torch.cuda.synchronize(device)
-                duration_ms = round((time.perf_counter() - start) * 1000, 2)
-                logger.info(
-                    "warmup_step_ok",
-                    extra={
-                        "model": getattr(model, "name", "unknown"),
-                        "step": step + 1,
-                        "latency_ms": duration_ms,
-                        "batch_size": current_batch,
-                        "workers": current_workers,
-                        "capability": "text-embedding",
-                        "executor": _executor_label(executor),
-                    },
-                )
-                step_complete = True
-            except torch.cuda.OutOfMemoryError:  # pragma: no cover - defensive
-                logger.exception(
-                    "warmup_oom",
-                    extra={
-                        "model": getattr(model, "name", "unknown"),
-                        "step": step + 1,
-                        "batch_size": current_batch,
-                        "workers": current_workers,
-                        "capability": "text-embedding",
-                        "executor": _executor_label(executor),
-                    },
-                )
-                raise
-            except Exception:  # pragma: no cover - startup guardrail
-                logger.exception(
-                    "warmup_failed",
-                    extra={
-                        "model": getattr(model, "name", "unknown"),
-                        "step": step + 1,
-                        "capability": "text-embedding",
-                        "executor": _executor_label(executor),
-                    },
-                )
-                _record_pool_readiness(
-                    model_name=getattr(model, "name", "unknown"),
-                    capability="text-embedding",
-                    executor=executor,
-                    workers=current_workers,
-                    ready=False,
-                )
-                return False
-        if current_workers <= 0:
-            break
-
-    _record_pool_readiness(
+    context = WarmupContext(
         model_name=getattr(model, "name", "unknown"),
         capability="text-embedding",
+        device=device,
+        config=config,
         executor=executor,
-        workers=current_workers,
-        ready=True,
     )
-    return True
+
+    def _run_once() -> None:
+        with _inference_context(enabled=config.use_inference_mode):
+            typed_model.embed(config.texts[: config.batch_size])
+
+    # Reuse the generic warmup harness so worker count and VRAM budgeting are
+    # handled consistently with other capabilities.
+    return _warmup_with_executor(
+        context=context,
+        run_once=_run_once,
+        step_extra={"batch_size": config.batch_size},
+    )
 
 
 def _run_warmup_step(

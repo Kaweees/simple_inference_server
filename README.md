@@ -120,18 +120,20 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - `MODELS` (required): comma-separated model IDs from `configs/model_config.yaml`.
 - `MODEL_DEVICE`: `cpu` | `mps` | `cuda` | `cuda:<idx>` | `auto` (default).
 - `AUTO_DOWNLOAD_MODELS` (default `1`): download selected models on startup; set to `0` to require pre-downloaded weights. Startup exits on download/load failure.
-- `WARMUP_FAIL_FAST` (alias `REQUIRE_WARMUP_SUCCESS`, default `1`): when warmup is enabled, abort startup if any model warmup fails instead of serving partially warmed models.
+- **Warmup behavior**: `ENABLE_WARMUP` (default `1`) enables a multi-capability warmup pass across embeddings / chat / vision / audio. When warmup is enabled the server **always fails fast** if any model warmup fails; use `WARMUP_ALLOWLIST` / `WARMUP_SKIPLIST` to scope coverage instead of turning off fail-fast.
 - Chat generation defaults: per-model `defaults` (temperature/top_p/max_tokens) in the config; request args override.
 - Embedding batching queue: `EMBEDDING_BATCH_QUEUE_SIZE` (default `64`, falls back to `BATCH_QUEUE_SIZE` / `MAX_QUEUE_SIZE`) bounds the per-model micro-batch queue to prevent unbounded RAM growth.
 - Audio path isolation: `AUDIO_MAX_CONCURRENT` / `AUDIO_MAX_QUEUE_SIZE` / `AUDIO_QUEUE_TIMEOUT_SEC` plus `AUDIO_MAX_WORKERS` size a dedicated limiter + thread pool for Whisper so it will not block chat/embedding traffic; default worker count is **1** and Whisper currently serializes work with a lock, so bumping workers only helps if you fork per-worker pipelines.
   - Handlers must be thread-safe if `AUDIO_MAX_WORKERS` > 1; otherwise wrap shared state with locks (Whisper handler already guards its pipeline but still serializes by default).
 - Request timeouts: `EMBEDDING_GENERATE_TIMEOUT_SEC` (default `60`) and `AUDIO_PROCESS_TIMEOUT_SEC` (default `180`) bound executor work to keep queues from clogging under hung models.
-- Cancellation is best-effort: disconnects/timeouts raise cancel signals but already-running model kernels are not preemptive; rely on timeouts, queue bounds, and low `MAX_CONCURRENT` for protection.
-- Chat batching (text-only): `ENABLE_CHAT_BATCHING` (default `1`), `CHAT_BATCH_WINDOW_MS` (default `10` ms), `CHAT_BATCH_MAX_SIZE` (default `8`), `CHAT_BATCH_QUEUE_SIZE` (default `64`), `CHAT_MAX_PROMPT_TOKENS` (default `4096`), `CHAT_MAX_NEW_TOKENS` (default `2048`), `CHAT_BATCH_ALLOW_VISION` (default `0` keeps vision models on legacy path).
+- **Cancellation and status codes** (best-effort): for embeddings, chat, and audio we race executor work against client disconnect and a hard timeout. Timeouts surface as `504 Gateway Timeout`; client-side aborts (disconnect or cancel) surface as `499 Client Closed Request`. Model kernels are not preempted—timeouts/cancellations only cut off responses and free queue capacity—so keep `MAX_CONCURRENT` / timeouts conservative.
+- Chat batching (text-only): `ENABLE_CHAT_BATCHING` (default `1`), `CHAT_BATCH_WINDOW_MS` (default `10` ms), `CHAT_BATCH_MAX_SIZE` (default `8`), `CHAT_BATCH_QUEUE_SIZE` (default `64`), `CHAT_MAX_PROMPT_TOKENS` (default `4096`), `CHAT_MAX_NEW_TOKENS` (default `2048`), `CHAT_BATCH_ALLOW_VISION` (default `0` keeps vision models on an unbatched path).
 - Chat scheduler tuning: `CHAT_COUNT_MAX_WORKERS` (token-count threads, default `2`), `CHAT_REQUEUE_RETRIES` (default `3`) and `CHAT_REQUEUE_BASE_DELAY_MS` (default `5`) control requeue backoff to降低峰值 429。
-- Chat cancellation: client disconnects or server-side timeouts raise a cancel signal to the model (stopping criteria). This is **best-effort**—already-running kernels keep executing; use a process-isolated backend if you need hard preemption.
+- Chat cancellation: the chat path now shares the same cancellation helper as embeddings/audio, so `499` / `504` behavior and metrics are aligned across all three capabilities. As with other paths, cancellation is cooperative at the application level only.
+- Embedding usage token counting: by default the embeddings endpoint performs a second tokenizer pass per request to populate `usage.prompt_tokens` in the OpenAI-style response. Set `EMBEDDING_USAGE_DISABLE_TOKEN_COUNT=1` to skip this work (usage fields will report `prompt_tokens=0`) in high-QPS scenarios where you do not need per-request token accounting.
 - Vision fetch safety (Qwen3-VL): `ALLOW_REMOTE_IMAGES=0` (default), `REMOTE_IMAGE_TIMEOUT=5`, `MAX_REMOTE_IMAGE_BYTES=5242880`. Remote HTTP fetch stays **disabled by default** to avoid SSRF/large downloads; enable only with trusted sources **and** set `REMOTE_IMAGE_HOST_ALLOWLIST` (comma-separated domains) or the request will be rejected. Private/loopback IPs are blocked even if allowlisted.
-  - TODO: add bandwidth/throughput metrics for remote image fetch when enabled.
+  - When the HTTP client for remote images is first created, its `timeout` and connection limits are logged so misconfigurations are visible in logs.
+- TODO: add bandwidth/throughput metrics for remote image fetch when enabled.
 - FP8 models need `accelerate`; non-FP8 variants avoid this dependency.
 
 ## Features
@@ -222,7 +224,15 @@ Warmup controls:
 - `WARMUP_INFERENCE_MODE` (default `1`): use `torch.inference_mode()` / `no_grad` during warmup.
 - `WARMUP_VRAM_BUDGET_MB` / `WARMUP_VRAM_PER_WORKER_MB`: limit concurrent warmup workers based on memory headroom.
 - `WARMUP_ALLOWLIST` / `WARMUP_SKIPLIST`: include or skip specific models.
-- `REQUIRE_WARMUP_SUCCESS` (default `1`): fail startup if any model warmup fails.
+- **Fail-fast guarantee**: when `ENABLE_WARMUP=1`, startup will always fail if any model warmup fails; turn warmup off entirely with `ENABLE_WARMUP=0` if you prefer to skip this guardrail.
+
+Warmup worker selection (VRAM budgeting):
+
+- **Base workers**: per capability, warmup starts from `min(executor_max_workers, MAX_CONCURRENT)`.
+- **VRAM budget**: on CUDA devices, if `WARMUP_VRAM_BUDGET_MB > 0` and `WARMUP_VRAM_PER_WORKER_MB > 0`, warmup further caps workers to `floor(budget / per_worker)`; if `WARMUP_VRAM_BUDGET_MB=0`, the budget defaults to the runtime free VRAM reported by `torch.cuda.mem_get_info`.
+- **Effective workers**: `max(1, min(base_workers, floor(budget / per_worker)))`.
+
+Example: with `MAX_CONCURRENT=4`, an executor sized to 8 workers, `WARMUP_VRAM_BUDGET_MB=4096` and `WARMUP_VRAM_PER_WORKER_MB=1024`, warmup will fan out to 4 workers for that capability.
 
 Request batching: by default the server can micro-batch concurrent embedding requests. Configure via `ENABLE_EMBEDDING_BATCHING` (default on), `EMBEDDING_BATCH_WINDOW_MS` (collection window, default `6` ms), and `EMBEDDING_BATCH_WINDOW_MAX_SIZE` (max combined batch). Set `EMBEDDING_BATCH_WINDOW_MS=0` to effectively disable coalescing.
 
@@ -232,10 +242,10 @@ Embedding cache: repeated inputs are served from an in-memory LRU keyed by the f
 
 - **Concurrency gate**: `MAX_CONCURRENT` caps how many requests may run model forwards at once via the global limiter. Per-capability worker counts (`EMBEDDING_MAX_WORKERS`, `CHAT_MAX_WORKERS`, `VISION_MAX_WORKERS`, `AUDIO_MAX_WORKERS`) size the underlying thread pools but do **not** bypass the limiter. For most deployments, keep each `*_MAX_WORKERS` ≤ `MAX_CONCURRENT` to avoid oversubscribing CPU/GPU threads; on a single GPU/MPS start with `MAX_CONCURRENT=1–2` and small worker pools, and only raise them if throughput improves while p99 stays acceptable.
 - **Micro-batching**: keep `ENABLE_EMBEDDING_BATCHING=1`; tune `EMBEDDING_BATCH_WINDOW_MS` (e.g., 4–10 ms; default `6` ms) and `EMBEDDING_BATCH_WINDOW_MAX_SIZE` (8–16) to trade a few ms of queueing for higher throughput. Set `EMBEDDING_BATCH_WINDOW_MS=0` to disable coalescing.
-- **Chat batching (text-only)**: `ENABLE_CHAT_BATCHING=1` by default; tune `CHAT_BATCH_WINDOW_MS` (e.g., 4–10 ms) and `CHAT_BATCH_MAX_SIZE` (4–8). Guards: `CHAT_MAX_PROMPT_TOKENS` (default 4096) and `CHAT_MAX_NEW_TOKENS` (default 2048). Vision models stay on the legacy path unless `CHAT_BATCH_ALLOW_VISION=1`.
+- **Chat batching (text-only)**: `ENABLE_CHAT_BATCHING=1` by default; tune `CHAT_BATCH_WINDOW_MS` (e.g., 4–10 ms) and `CHAT_BATCH_MAX_SIZE` (4–8). Guards: `CHAT_MAX_PROMPT_TOKENS` (default 4096) and `CHAT_MAX_NEW_TOKENS` (default 2048). Vision models stay on the unbatched path unless `CHAT_BATCH_ALLOW_VISION=1`.
 - **Chat token counting**: defaults to a dedicated pool (`CHAT_COUNT_USE_CHAT_EXECUTOR=0`). Flip to `1` only if you want counting to share chat worker threads and can tolerate possible head-of-line blocking.
 - **Queueing**: `MAX_QUEUE_SIZE` controls how many requests can wait. Too large increases tail latency; too small yields 429s. Set per your SLA.
-- **Warmup**: keep `ENABLE_WARMUP=1`; for heavier models raise `WARMUP_STEPS` / `WARMUP_BATCH_SIZE` (e.g., 2–3 steps, batch 4–8). Restart after changing models or devices.
+- **Warmup**: keep `ENABLE_WARMUP=1`; for heavier models raise `WARMUP_STEPS` / `WARMUP_BATCH_SIZE` (e.g., 2–3 steps, batch 4–8). Use `WARMUP_VRAM_BUDGET_MB` / `WARMUP_VRAM_PER_WORKER_MB` to bound warmup fan-out on tighter GPUs; restart after changing models or devices.
 - **Device choice**: set `MODEL_DEVICE` (`cuda`, `cuda:<idx>`, `mps`, `cpu`). On macOS MPS, performance varies with temperature/power; on CUDA you can try `MAX_CONCURRENT=2–4`.
 - **Batch/input guards**: `MAX_BATCH_SIZE` and `MAX_TEXT_CHARS` protect the API—keep them within what the model can handle.
 - **Audio guard**: `MAX_AUDIO_BYTES` (default 25MB) limits upload size for Whisper endpoints.

@@ -25,9 +25,18 @@ Avoid calling `pytest`, `ruff`, or `mypy` directly without `uv run` to ensure th
 ## Engineering notes / conventions
 
 - When adding internal tasks that use `limiter` / `audio_limiter`, always set a queue label (model or task name) via `set_queue_label` / `set_audio_queue_label` so queue-wait metrics stay attributable instead of falling back to `generic`.
-- New audio/vision handlers must be thread-safe if they run in a shared thread pool; either design them as thread-safe or protect non-thread-safe resources (tokenizers, pipelines, HTTP clients) with locks similar to `WhisperASR`.
+- Handler authors may expose a boolean `thread_safe` attribute; when `True` the handler is expected to be safe under up to `*_MAX_WORKERS` concurrent calls from the shared executor for that capability, without extra locking at the call site. When `False` the handler must serialize internal shared state (tokenizers, pipelines, HTTP clients) with its own locks; the server will still use the shared executor but will emit warnings if the corresponding worker count is >1 so operators know concurrency is effectively 1.
 - **Requeue path on chat batching**: When batching splits by generation parameters, leftover items are now requeued with bounded exponential backoff and a per-item deadline. This smooths burstiness without unbounded retries; items that cannot be requeued in time surface as 429s and are counted via `CHAT_BATCH_REQUEUES` / `CHAT_BATCH_QUEUE_REJECTIONS` metrics.【F:app/chat_batching.py†L171-L365】
 - **Visibility of warmup coverage**: Warmup metrics record pool readiness and `/health` exposes `warmup` details including per-model capability success plus `warmup_failures`. Operators can see which models/capabilities skipped or failed warmup without inspecting logs.【F:app/api.py†L1076-L1136】【F:app/warmup.py†L140-L185】
+
+## Future-facing structure: lightweight pools and protocols
+
+- Protocols for embeddings/chat/audio now live in `app/models/base.py`, and placeholder `RerankModel` / `IntentModel` protocols are defined in the same style. Future rerank/intent handlers should implement these interfaces so they can plug into batching/limiters consistently with existing model types.
+- A future “lightweight model pool” limiter is expected for embeddings/intent/rerank: conceptually a dedicated limiter + small thread pool that:
+  - gatekeeps inexpensive models (embeddings/intent/rerank) independently from the heavier chat/vision/audio pools;
+  - exposes its own `{light_model}_request_queue_wait_seconds` metrics and `*_queue_rejections_total` counters;
+  - allows different `MAX_CONCURRENT_LIGHT` / `LIGHT_MAX_QUEUE_SIZE` settings tuned for high-QPS, low-latency workloads.
+- The current design already keeps chat/audio on dedicated executors and an audio-specific limiter; the lightweight pool can be introduced alongside these without changing existing behavior, then endpoints for embeddings/intent/rerank can be gradually migrated to it.
 
 ## Documentation alignment
 

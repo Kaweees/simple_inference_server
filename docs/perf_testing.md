@@ -132,7 +132,7 @@ uv run python scripts/benchmark_chat.py \
 - 少量请求（例如 10–20），验证：
 
   - 远程图片关闭时（`ALLOW_REMOTE_IMAGES=0`），使用 `data:` / 本地路径是否稳定；
-  - 开启远程图片（`ALLOW_REMOTE_IMAGES=1` 且配置 `REMOTE_IMAGE_HOST_ALLOWLIST`）时，大图片或非法 host 能否被拒绝。
+  - 开启远程图片（`ALLOW_REMOTE_IMAGES=1` 且配置 `REMOTE_IMAGE_HOST_ALLOWLIST`）时，大图片或非法 host 能否被拒绝。远程 HTTP fetch 内置了一系列安全措施：仅允许显式 allowlist 中的域名、拒绝私有/环回 IP、限制单次响应大小（`MAX_REMOTE_IMAGE_BYTES`）、校验 MIME 类型与重定向次数，并在 HTTP client 创建时将 `timeout` 与连接上限写入日志，便于排查配置问题。
 
 样例 curl（参考 README 中 Qwen-VL 示例）即可，不必额外写脚本。
 
@@ -181,6 +181,13 @@ uv run python scripts/benchmark_audio.py \
 - `audio_request_latency_seconds{model}`
 - `audio_request_queue_wait_seconds{model}`
 
+**取消与超时（统一语义）**
+
+- 所有三条主路径（embeddings / chat / audio）都通过一个统一的 helper 处理“模型执行 + 客户端断开 + 硬超时”的竞态：
+  - 当达到 `EMBEDDING_GENERATE_TIMEOUT_SEC` / `CHAT_GENERATE_TIMEOUT_SEC` / `AUDIO_PROCESS_TIMEOUT_SEC` 时返回 `504 Gateway Timeout`，并计入各自的 `*_requests_total{status="504"}`；
+  - 客户端主动断开或在服务器侧被视为取消时返回 `499 Client Closed Request`。
+- 这些取消都是 **最佳努力**：不会抢占底层 kernel，只是停止向客户端发送数据并释放队列/并发位；调参时可以通过 499 / 504 的比例来区分“客户端侧取消”与“服务端超时”。
+
 **全局队列拒绝**
 
 - `embedding_queue_rejections_total`（由 limiter / audio_limiter 共享）
@@ -204,6 +211,8 @@ uv run python scripts/benchmark_audio.py \
 - `chat_batch_queue_rejections_total{model}`：因队列限制被拒绝的请求数
 - `chat_batch_requeues_total{model}`：因配置不兼容/回退导致的重入队列次数
 - `chat_count_pool_size`：token counting 线程池大小
+
+当 chat 队列老化严重、请求被 `_QUEUE_MAX_WAIT_SEC` 或 `_REQUEUE_MAX_WAIT_SEC` 丢弃时，日志中会出现类似 `chat_batch_items_dropped_due_to_queue_wait` 的行，包含 `model`、`dropped`（本次被丢弃条数）、`queue_size`、`max_queue_size` 和 `queue_max_wait_sec`。配合 `chat_batch_queue_rejections_total{model}` 一起看，可以判断是 batch 队列本身过小/窗口过长，还是模型实际算力不足。
 
 **Embedding 批处理与缓存**
 
@@ -266,9 +275,9 @@ uv run python scripts/benchmark_audio.py \
 
 4. **warmup 阶段启动时间过长或偶发 OOM**
    - 降低：
-     - `WARMUP_BATCH_SIZE`、`WARMUP_STEPS`；
+   - `WARMUP_BATCH_SIZE`、`WARMUP_STEPS`；
    - 或限制：
-     - `WARMUP_VRAM_BUDGET_MB`、`WARMUP_VRAM_PER_WORKER_MB`，让 warmup 使用更保守的 worker 数；
+   - `WARMUP_VRAM_BUDGET_MB`、`WARMUP_VRAM_PER_WORKER_MB`，让 warmup 使用更保守的 worker 数。实际 worker 数 roughly 为 `min(executor_max_workers, MAX_CONCURRENT, floor(budget / per_worker))`；当 `WARMUP_VRAM_BUDGET_MB=0` 时会使用当前设备的可用显存作为 budget。
    - 通过 `/health` 与 `warmup_pool_ready_workers` 确认 warmup 覆盖与失败模型。
 
 ---
