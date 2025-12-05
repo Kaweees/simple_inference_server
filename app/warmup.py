@@ -411,6 +411,12 @@ def _select_worker_count(
     if not _is_cuda_device(device):
         return base
 
+    # Default to a conservative single worker on CUDA unless an explicit VRAM
+    # budget is provided. This avoids oversubscribing GPU memory when multiple
+    # models are warmed concurrently.
+    if vram_budget_mb <= 0:
+        return 1
+
     available_mb = _available_vram_mb(device)
     budget_mb = vram_budget_mb if vram_budget_mb > 0 else available_mb
     if budget_mb <= 0 or per_worker_vram_mb <= 0:

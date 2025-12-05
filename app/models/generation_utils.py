@@ -8,6 +8,8 @@ from typing import Any
 import torch
 from transformers import StoppingCriteria
 
+from app.utils.device import resolve_device
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,16 +21,14 @@ def resolve_runtime_device(preference: str) -> str:
 
     Returns:
         Resolved device string
+
+        Note:
+        This function delegates to app.utils.device.resolve_device. Unlike the
+        legacy behavior, non-auto values are validated so misconfigurations fail
+        fast instead of silently falling back to CPU.
     """
-    pref = (preference or "auto").lower()
-    if pref != "auto":
-        return preference
-    backends = getattr(torch, "backends", None)
-    if getattr(torch.cuda, "is_available", lambda: False)():
-        return "cuda"
-    if backends and getattr(backends, "mps", None) and backends.mps.is_available():
-        return "mps"
-    return "cpu"
+    pref = preference or "auto"
+    return resolve_device(pref, validate=pref != "auto")
 
 
 def handle_oom(exc: BaseException, model_name: str, device: Any) -> None:
