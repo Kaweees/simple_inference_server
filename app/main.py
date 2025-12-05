@@ -65,10 +65,10 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:  # 
     _warn_thread_unsafe_models(registry)
     _validate_ffmpeg_for_audio(registry)
 
-    batching_enabled = os.getenv("ENABLE_BATCHING", "1") != "0"
-    batch_window_ms = float(os.getenv("BATCH_WINDOW_MS", "6"))
+    batching_enabled = os.getenv("ENABLE_EMBEDDING_BATCHING", "1") != "0"
+    batch_window_ms = float(os.getenv("EMBEDDING_BATCH_WINDOW_MS", "6"))
     batch_max_size = int(
-        os.getenv("BATCH_WINDOW_MAX_SIZE", os.getenv("BATCH_MAX_SIZE", os.getenv("MAX_BATCH_SIZE", "32")))
+        os.getenv("EMBEDDING_BATCH_WINDOW_MAX_SIZE", os.getenv("MAX_BATCH_SIZE", "32"))
     )
     batch_queue_size = int(os.getenv("EMBEDDING_BATCH_QUEUE_SIZE", os.getenv("BATCH_QUEUE_SIZE", os.getenv("MAX_QUEUE_SIZE", "64"))))
     batching_service = BatchingService(

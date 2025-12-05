@@ -59,7 +59,7 @@ uv run python scripts/run_dev.py --device auto
 - 线程池大小：`EMBEDDING_MAX_WORKERS`、`CHAT_MAX_WORKERS`、`VISION_MAX_WORKERS`、`AUDIO_MAX_WORKERS` 只决定各自 `ThreadPoolExecutor` 的线程数，本身不会绕过 limiter。
 - 推荐做法：
   - 大多数场景下令 `*_MAX_WORKERS <= MAX_CONCURRENT`，避免在设备上过度抢占 CPU/GPU 线程。
-  - 单机单卡：可以先从 `MAX_CONCURRENT=1` 或 `2` + 小线程池开始，通过调 `BATCH_WINDOW_MS` / `CHAT_BATCH_WINDOW_MS` 提升吞吐，而不是一味加并发。
+  - 单机单卡：可以先从 `MAX_CONCURRENT=1` 或 `2` + 小线程池开始，通过调 `EMBEDDING_BATCH_WINDOW_MS` / `CHAT_BATCH_WINDOW_MS` 提升吞吐，而不是一味加并发。
   - 音频路径：`AUDIO_MAX_CONCURRENT` 单独控制 Whisper 的并发度，通常建议小于或等于 `MAX_CONCURRENT`，避免音频任务拖慢 embeddings/chat。
 
 ## 压测场景设计
@@ -67,7 +67,7 @@ uv run python scripts/run_dev.py --device auto
 ### 1. Embeddings 压测（高 QPS 高频调用的核心路径）
 
 **推荐脚本**：`scripts/benchmark_embeddings.py`  
-**建议目标**：观察在不同 `MAX_CONCURRENT`、`BATCH_WINDOW_MS`、`BATCH_WINDOW_MAX_SIZE` 下的吞吐与 p95/p99。
+**建议目标**：观察在不同 `MAX_CONCURRENT`、`EMBEDDING_BATCH_WINDOW_MS`、`EMBEDDING_BATCH_WINDOW_MAX_SIZE` 下的吞吐与 p95/p99。
 
 示例命令：
 
@@ -83,8 +83,8 @@ uv run python scripts/benchmark_embeddings.py \
 **可尝试的维度**：
 
 - `MAX_CONCURRENT = 1 / 2 / 4`
-- `BATCH_WINDOW_MS = 0 / 4 / 6 / 10`
-- `BATCH_WINDOW_MAX_SIZE = 8 / 16 / 32`
+- `EMBEDDING_BATCH_WINDOW_MS = 0 / 4 / 6 / 10`
+- `EMBEDDING_BATCH_WINDOW_MAX_SIZE = 8 / 16 / 32`
 
 **关注点**：
 
@@ -250,10 +250,10 @@ uv run python scripts/benchmark_audio.py \
 
 2. **p99 延迟过高但 GPU/CPU 利用率不高**
    - 检查：
-     - `BATCH_WINDOW_MS` 是否设置过大；
+     - `EMBEDDING_BATCH_WINDOW_MS` 是否设置过大；
      - chat/embedding 队列等待直方图是否拉长；
    - 调整策略：
-     - 降低 `BATCH_WINDOW_MS` / `CHAT_BATCH_WINDOW_MS`；
+     - 降低 `EMBEDDING_BATCH_WINDOW_MS` / `CHAT_BATCH_WINDOW_MS`；
      - 在单机场景下尝试 `MAX_CONCURRENT=1` 或 2，通过批处理抬高吞吐，而不是单纯加并发。
 
 3. **音频请求拖慢整体响应**
@@ -302,4 +302,3 @@ curl -X POST http://localhost:8000/v1/embeddings \
 ```
 
 你可以按本文件的步骤，在需要压测时逐条执行和对照监控。
-

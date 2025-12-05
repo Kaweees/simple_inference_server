@@ -15,7 +15,7 @@ services:
       - MODELS=meta-llama/Llama-3.2-3B-Instruct
       - MODEL_DEVICE=cuda
       - MAX_CONCURRENT=1           # keep decode contention low
-      - ENABLE_BATCHING=0          # chat path runs per-request
+      - ENABLE_EMBEDDING_BATCHING=0  # chat path runs per-request
       - HF_HOME=/app/models
       - ENABLE_WARMUP=1
     volumes:
@@ -42,9 +42,9 @@ services:
       # Embedding replica on GPU1
       - MODELS=BAAI/bge-m3
       - MODEL_DEVICE=cuda
-      - ENABLE_BATCHING=1
-      - BATCH_WINDOW_MS=6
-      - BATCH_WINDOW_MAX_SIZE=16
+      - ENABLE_EMBEDDING_BATCHING=1
+      - EMBEDDING_BATCH_WINDOW_MS=6
+      - EMBEDDING_BATCH_WINDOW_MAX_SIZE=16
       - MAX_CONCURRENT=6
       - HF_HOME=/app/models
       - ENABLE_WARMUP=1

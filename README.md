@@ -224,14 +224,14 @@ Warmup controls:
 - `WARMUP_ALLOWLIST` / `WARMUP_SKIPLIST`: include or skip specific models.
 - `REQUIRE_WARMUP_SUCCESS` (default `1`): fail startup if any model warmup fails.
 
-Request batching: by default the server can micro-batch concurrent embedding requests. Configure via `ENABLE_BATCHING` (default on), `BATCH_WINDOW_MS` (collection window, default `6` ms), and `BATCH_WINDOW_MAX_SIZE` (max combined batch). Set `BATCH_WINDOW_MS=0` to effectively disable coalescing.
+Request batching: by default the server can micro-batch concurrent embedding requests. Configure via `ENABLE_EMBEDDING_BATCHING` (default on), `EMBEDDING_BATCH_WINDOW_MS` (collection window, default `6` ms), and `EMBEDDING_BATCH_WINDOW_MAX_SIZE` (max combined batch). Set `EMBEDDING_BATCH_WINDOW_MS=0` to effectively disable coalescing.
 
 Embedding cache: repeated inputs are served from an in-memory LRU keyed by the full text. Control size with `EMBEDDING_CACHE_SIZE` (default `256` entries per model instance); set to `0` to disable. Prometheus counters `embedding_cache_hits_total` / `embedding_cache_misses_total` expose effectiveness per model.
 
 ## Performance tuning (quick checklist)
 
 - **Concurrency gate**: `MAX_CONCURRENT` caps how many requests may run model forwards at once via the global limiter. Per-capability worker counts (`EMBEDDING_MAX_WORKERS`, `CHAT_MAX_WORKERS`, `VISION_MAX_WORKERS`, `AUDIO_MAX_WORKERS`) size the underlying thread pools but do **not** bypass the limiter. For most deployments, keep each `*_MAX_WORKERS` ≤ `MAX_CONCURRENT` to avoid oversubscribing CPU/GPU threads; on a single GPU/MPS start with `MAX_CONCURRENT=1–2` and small worker pools, and only raise them if throughput improves while p99 stays acceptable.
-- **Micro-batching**: keep `ENABLE_BATCHING=1`; tune `BATCH_WINDOW_MS` (e.g., 4–10 ms; default `6` ms) and `BATCH_WINDOW_MAX_SIZE` (8–16) to trade a few ms of queueing for higher throughput. Set `BATCH_WINDOW_MS=0` to disable coalescing.
+- **Micro-batching**: keep `ENABLE_EMBEDDING_BATCHING=1`; tune `EMBEDDING_BATCH_WINDOW_MS` (e.g., 4–10 ms; default `6` ms) and `EMBEDDING_BATCH_WINDOW_MAX_SIZE` (8–16) to trade a few ms of queueing for higher throughput. Set `EMBEDDING_BATCH_WINDOW_MS=0` to disable coalescing.
 - **Chat batching (text-only)**: `ENABLE_CHAT_BATCHING=1` by default; tune `CHAT_BATCH_WINDOW_MS` (e.g., 4–10 ms) and `CHAT_BATCH_MAX_SIZE` (4–8). Guards: `CHAT_MAX_PROMPT_TOKENS` (default 4096) and `CHAT_MAX_NEW_TOKENS` (default 2048). Vision models stay on the legacy path unless `CHAT_BATCH_ALLOW_VISION=1`.
 - **Chat token counting**: defaults to a dedicated pool (`CHAT_COUNT_USE_CHAT_EXECUTOR=0`). Flip to `1` only if you want counting to share chat worker threads and can tolerate possible head-of-line blocking.
 - **Queueing**: `MAX_QUEUE_SIZE` controls how many requests can wait. Too large increases tail latency; too small yields 429s. Set per your SLA.
@@ -243,9 +243,9 @@ Embedding cache: repeated inputs are served from an in-memory LRU keyed by the f
 
 ### GPU tuning (example starting points)
 
-- **Single RTX-class GPU (e.g., RTX 6000 Ada/Pro 6000)**: `MODEL_DEVICE=cuda`, `MAX_CONCURRENT=1`, `BATCH_WINDOW_MS=4–6`, `BATCH_WINDOW_MAX_SIZE=16`, `MAX_QUEUE_SIZE=128`, `ENABLE_WARMUP=1`, `WARMUP_STEPS=2`, `WARMUP_BATCH_SIZE=8`. Increase `MAX_CONCURRENT` only if p99 stays flat.
+- **Single RTX-class GPU (e.g., RTX 6000 Ada/Pro 6000)**: `MODEL_DEVICE=cuda`, `MAX_CONCURRENT=1`, `EMBEDDING_BATCH_WINDOW_MS=4–6`, `EMBEDDING_BATCH_WINDOW_MAX_SIZE=16`, `MAX_QUEUE_SIZE=128`, `ENABLE_WARMUP=1`, `WARMUP_STEPS=2`, `WARMUP_BATCH_SIZE=8`. Increase `MAX_CONCURRENT` only if p99 stays flat.
 - **Multi-GPU**: pin with `CUDA_VISIBLE_DEVICES` and run multiple replicas, one per GPU. Keep `MAX_CONCURRENT` per replica low (1–2) and rely on batching for utilization.
-- **Latency-sensitive**: set `BATCH_WINDOW_MS=0` to disable coalescing; keep `MAX_CONCURRENT=1` to minimize tail.
+- **Latency-sensitive**: set `EMBEDDING_BATCH_WINDOW_MS=0` to disable coalescing; keep `MAX_CONCURRENT=1` to minimize tail.
 
 ## cURL example
 

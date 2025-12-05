@@ -151,9 +151,11 @@ class BatchingService:
     ) -> None:
         self.enabled = enabled
         self.max_batch_size = max_batch_size or int(
-            os.getenv("BATCH_WINDOW_MAX_SIZE", os.getenv("BATCH_MAX_SIZE", os.getenv("MAX_BATCH_SIZE", "32")))
+            os.getenv("EMBEDDING_BATCH_WINDOW_MAX_SIZE", os.getenv("MAX_BATCH_SIZE", "32"))
         )
-        self.window_ms = window_ms if window_ms is not None else float(os.getenv("BATCH_WINDOW_MS", "6"))
+        self.window_ms = window_ms if window_ms is not None else float(
+            os.getenv("EMBEDDING_BATCH_WINDOW_MS", "6")
+        )
         self.queue_size = queue_size if queue_size is not None else int(
             os.getenv("EMBEDDING_BATCH_QUEUE_SIZE", os.getenv("BATCH_QUEUE_SIZE", os.getenv("MAX_QUEUE_SIZE", "64")))
         )
