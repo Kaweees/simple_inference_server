@@ -25,7 +25,7 @@ uv sync
 2. 预下载模型（可选，若保留 `AUTO_DOWNLOAD_MODELS=1` 可跳过）：
 
 ```bash
-MODELS=BAAI/bge-m3,meta-llama/Llama-3.2-1B-Instruct uv run python scripts/download_models.py
+MODELS=BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507 uv run python scripts/download_models.py
 MODELS=openai/whisper-tiny uv run python scripts/download_models.py
 ```
 
@@ -33,13 +33,13 @@ MODELS=openai/whisper-tiny uv run python scripts/download_models.py
 
 ```bash
 # 仅 embeddings + chat
-MODELS=BAAI/bge-m3,meta-llama/Llama-3.2-1B-Instruct \
+MODELS=BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507 \
 MODEL_DEVICE=auto \
 MAX_CONCURRENT=2 \
 uv run python scripts/run_dev.py --device auto
 
 # 加上 Whisper 音频
-MODELS=BAAI/bge-m3,meta-llama/Llama-3.2-1B-Instruct,openai/whisper-tiny \
+MODELS=BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507,openai/whisper-tiny \
 MODEL_DEVICE=auto \
 MAX_CONCURRENT=2 \
 AUDIO_MAX_CONCURRENT=1 \
@@ -103,7 +103,7 @@ uv run python scripts/benchmark_embeddings.py \
 
 ```bash
 uv run python scripts/benchmark_chat.py \
-  --model-name meta-llama/Llama-3.2-1B-Instruct \
+  --model-name Qwen/Qwen3-4B-Instruct-2507 \
   --prompt "Explain FP8 quantization" \
   --n-requests 100 \
   --concurrency 8 \

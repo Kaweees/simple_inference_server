@@ -7,7 +7,7 @@ Usage:
   uv run python scripts/manual_smoke.py \
     --base-url http://localhost:8000 \
     --embed-model BAAI/bge-m3 \
-    --chat-model meta-llama/Llama-3.2-1B-Instruct \
+    --chat-model Qwen/Qwen3-4B-Instruct-2507 \
     --audio-model openai/whisper-tiny
 """
 

@@ -151,7 +151,8 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:  # 
             failed_list = ", ".join(sorted(warmup_failures))
             raise SystemExit(f"Warmup failed for model(s): {failed_list}")
 
-    ok_models = [] if warmup_failures else registry.list_models()
+    failed_set = set(warmup_failures)
+    ok_models = [name for name in registry.list_models() if name not in failed_set]
     warmup_status = WarmupStatus(
         required=warmup_required,
         completed=warmup_completed,

@@ -42,7 +42,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 2) Download the models you plan to load (examples) — optional if you keep AUTO_DOWNLOAD_MODELS=1  
 
    ```bash
-   MODELS=BAAI/bge-m3,meta-llama/Llama-3.2-1B-Instruct uv run python scripts/download_models.py
+   MODELS=BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507 uv run python scripts/download_models.py
    ```
 
    Audio (Whisper) quick demo:  
@@ -54,7 +54,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 3) Run the server  
 
    ```bash
-   MODELS=BAAI/bge-m3,meta-llama/Llama-3.2-1B-Instruct uv run python scripts/run_dev.py --device auto
+   MODELS=BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507 uv run python scripts/run_dev.py --device auto
    ```
 
    Run only Whisper for ASR/translation (auto-download will fetch weights if missing):  
@@ -77,7 +77,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
      ```bash
      curl -X POST http://localhost:8000/v1/chat/completions \
        -H "Content-Type: application/json" \
-       -d '{"model":"meta-llama/Llama-3.2-1B-Instruct","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":128}'
+       -d '{"model":"Qwen/Qwen3-4B-Instruct-2507","messages":[{"role":"user","content":"Who are you?"}],"max_tokens":128}'
      ```
 
    - Chat with image (Qwen3-VL):
@@ -111,7 +111,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
      uv run python scripts/manual_smoke.py \
        --base-url http://localhost:8000 \
        --embed-model BAAI/bge-m3 \
-       --chat-model meta-llama/Llama-3.2-1B-Instruct \
+       --chat-model Qwen/Qwen3-4B-Instruct-2507 \
        --audio-model openai/whisper-tiny
      ```
 
@@ -210,7 +210,7 @@ uv sync
 ```bash
 MODELS=BAAI/bge-m3 uv run python scripts/run_dev.py --device auto
 # MODELS must be set (comma-separated). Alternatively:
-# uv run python scripts/run_dev.py --models BAAI/bge-m3,meta-llama/Llama-3.2-1B-Instruct
+# uv run python scripts/run_dev.py --models BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507
 ```
 
 Default model cache is locked to the repo-local `models/` directory. Pre-download models via `scripts/download_models.py` (always writes to `models/`) before building or running the service. For private/licensed models, set `HF_TOKEN` only when running the download script; the runtime uses local files only.
@@ -295,7 +295,7 @@ Basic chat (text only):
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-        "model": "meta-llama/Llama-3.2-1B-Instruct",
+        "model": "Qwen/Qwen3-4B-Instruct-2507",
         "messages": [
           {"role": "user", "content": "Who are you?"}
         ],
@@ -307,7 +307,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 ## Benchmarking
 
 - Embeddings: `uv run python scripts/benchmark_embeddings.py --models BAAI/bge-m3 --n-requests 50 --concurrency 8`
-- Chat: `uv run python scripts/benchmark_chat.py --model-name meta-llama/Llama-3.2-1B-Instruct --prompt "Explain FP8 quantization" --n-requests 40 --concurrency 8`
+- Chat: `uv run python scripts/benchmark_chat.py --model-name Qwen/Qwen3-4B-Instruct-2507 --prompt "Explain FP8 quantization" --n-requests 40 --concurrency 8`
 - Audio (Whisper): `BASE_URL=http://localhost:8000 MODEL_NAME=openai/whisper-tiny uv run python scripts/benchmark_audio.py -- --n-requests 20 --concurrency 4`
 
 All benchmark scripts accept environment overrides (e.g., `BASE_URL`, `MODEL_NAME`, `PROMPT`, `N_REQUESTS`, `CONCURRENCY`).

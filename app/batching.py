@@ -78,6 +78,7 @@ class ModelBatcher:
                 total += len(nxt.texts)
 
             # Prepare batch
+            active_items: list[_BatchItem] = []
             texts: list[str] = []
             sizes: list[int] = []
             for bi in batch_items:
@@ -86,6 +87,7 @@ class ModelBatcher:
                     if not bi.future.done():
                         bi.future.set_exception(asyncio.CancelledError())
                     continue
+                active_items.append(bi)
                 texts.extend(bi.texts)
                 sizes.append(len(bi.texts))
 
@@ -93,7 +95,7 @@ class ModelBatcher:
                 continue
 
             # Merge cancel signals so a single event can be passed down to the model.
-            cancel_events = [bi.cancel_event for bi in batch_items if bi.cancel_event is not None]
+            cancel_events = [bi.cancel_event for bi in active_items if bi.cancel_event is not None]
             cancel_event = _merge_cancel_events(cancel_events)
 
             try:
@@ -102,14 +104,14 @@ class ModelBatcher:
                     functools.partial(self.model.embed, texts, cancel_event=cancel_event),
                 )
             except Exception as exc:  # pragma: no cover - defensive
-                for bi in batch_items:
+                for bi in active_items:
                     if not bi.future.done():
                         bi.future.set_exception(exc)
                 continue
 
             # Split outputs per request
             offset = 0
-            for bi, size in zip(batch_items, sizes, strict=False):
+            for bi, size in zip(active_items, sizes, strict=True):
                 with contextlib.suppress(Exception):
                     observe_embedding_batch_wait(getattr(self.model, "name", "unknown"), loop.time() - bi.enqueue_time)
                 if not bi.future.done():

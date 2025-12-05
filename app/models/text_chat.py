@@ -153,7 +153,7 @@ class TextChatModel(ChatModel):
         cancel_event: threading.Event | None = None,
     ) -> ChatGeneration:
         stop_criteria, stop_flag = self._build_stop_criteria(stop, cancel_event)
-        prompt_len = int(prepared.get("_prompt_len", prepared.get("input_ids").shape[1]))
+        prompt_len = int(prepared.get("_prompt_len") or prepared["input_ids"].shape[1])
         inputs = self._move_to_device({k: v for k, v in prepared.items() if k != "_prompt_len"})
 
         gen_kwargs: dict[str, Any] = {
@@ -267,7 +267,7 @@ class TextChatModel(ChatModel):
         prompt_lengths: list[int] = []
         for prepared in prepared_list:
             encodings.append({k: v for k, v in prepared.items() if k != "_prompt_len"})
-            prompt_lengths.append(int(prepared.get("_prompt_len", prepared.get("input_ids").shape[1])))
+            prompt_lengths.append(int(prepared.get("_prompt_len") or prepared["input_ids"].shape[1]))
 
         padded = self.tokenizer.pad(encodings, padding=True, return_tensors="pt")
         inputs = self._move_to_device(self._normalize_chat_template_output(padded))
