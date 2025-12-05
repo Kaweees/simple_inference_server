@@ -256,6 +256,7 @@ Embedding cache: repeated inputs are served from an in-memory LRU keyed by the f
 - **Single RTX-class GPU (e.g., RTX 6000 Ada/Pro 6000)**: `MODEL_DEVICE=cuda`, `MAX_CONCURRENT=1`, `EMBEDDING_BATCH_WINDOW_MS=4–6`, `EMBEDDING_BATCH_WINDOW_MAX_SIZE=16`, `MAX_QUEUE_SIZE=128`, `ENABLE_WARMUP=1`, `WARMUP_STEPS=2`, `WARMUP_BATCH_SIZE=8`. Increase `MAX_CONCURRENT` only if p99 stays flat.
 - **Multi-GPU**: pin with `CUDA_VISIBLE_DEVICES` and run multiple replicas, one per GPU. Keep `MAX_CONCURRENT` per replica low (1–2) and rely on batching for utilization.
 - **Latency-sensitive**: set `EMBEDDING_BATCH_WINDOW_MS=0` to disable coalescing; keep `MAX_CONCURRENT=1` to minimize tail.
+ - **CPU-only edge device (e.g., small VM/NAS)**: `MODEL_DEVICE=cpu`, `MAX_CONCURRENT=1`, `EMBEDDING_MAX_WORKERS=1–2`, `CHAT_MAX_WORKERS=1–2`, `AUDIO_MAX_CONCURRENT=1`. Prefer slightly larger batch windows over higher concurrency to keep tail latency controllable.
 
 ## cURL example
 

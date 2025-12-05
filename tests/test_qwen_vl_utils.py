@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from app.models.base import ChatGeneration
+from app.models.generation_utils import trim_with_stop
 from app.models.qwen_vl import QwenVLChat
 
 # --- Reusable Mocks ---------------------------------------------------------
@@ -73,7 +74,7 @@ class MockModel:
     ],
 )
 def test_trim_with_stop(text: str, stop: list[str], expected: str, hit: bool) -> None:
-    trimmed, got_hit = QwenVLChat._trim_with_stop(text, stop)
+    trimmed, got_hit = trim_with_stop(text, stop)
     assert trimmed == expected
     assert got_hit is hit
 

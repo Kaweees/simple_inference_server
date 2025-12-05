@@ -29,5 +29,6 @@
 - When constructing shell commands, **prefix Python invocations with `uv run`** unless there is a strong reason not to.
 - Assume dependencies come from `pyproject.toml` / `uv.lock`; avoid installing packages with `pip`.
 - Prefer absolute paths rooted at the workspace (e.g. `/path/to/simple_inference_server/...`) when calling tools.
-
-
+- Before handing off or committing changes, ensure both static checks pass with no errors:
+  - `uv run ruff check .`
+  - `uv run mypy app scripts tests`

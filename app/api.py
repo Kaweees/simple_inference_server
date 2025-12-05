@@ -59,7 +59,7 @@ from app.monitoring.metrics import (
     record_chat_request,
     record_request,
 )
-from app.state import WarmupStatus, warmup_status as global_warmup_status
+from app.state import WarmupStatus
 from app.threadpool import get_audio_executor, get_chat_executor, get_embedding_count_executor, get_embedding_executor
 from app.utils.uploads import chunked_upload_to_tempfile
 
@@ -241,6 +241,192 @@ async def _prepare_chat_request(
     return None, int(prompt_tokens)
 
 
+async def _run_chat_generation(  # noqa: PLR0915
+    *,
+    req: ChatCompletionRequest,
+    registry: ModelRegistry,
+    request: Request,
+    raw_messages: list[dict[str, Any]],
+    has_images: bool,
+) -> tuple[ChatGeneration, int, int]:
+    """Run chat generation with optional batching and shared timeout/cancel logic.
+
+    Returns the ChatGeneration together with (prompt_tokens, max_tokens) used
+    so the caller can build usage and logging without re-threading details.
+    """
+
+    model = _resolve_chat_model_and_caps(registry, req.model, has_images=has_images)
+
+    defaults = getattr(model, "generation_defaults", {}) or {}
+    max_tokens_default = defaults.get("max_tokens") or int(os.getenv("MAX_NEW_TOKENS", "512"))
+    temperature_default = defaults.get("temperature", 0.7)
+    top_p_default = defaults.get("top_p", 0.9)
+
+    max_tokens = req.max_tokens or max_tokens_default
+    if max_tokens <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="max_tokens must be positive",
+        )
+    temperature = req.temperature if req.temperature is not None else temperature_default
+    top_p = req.top_p if req.top_p is not None else top_p_default
+
+    loop = asyncio.get_running_loop()
+    executor = get_chat_executor()
+    max_prompt_tokens = int(os.getenv("CHAT_MAX_PROMPT_TOKENS", "4096"))
+    prepared_inputs, prompt_tokens = await _prepare_chat_request(model, raw_messages)
+    if prompt_tokens > max_prompt_tokens:
+        record_chat_request(req.model, "400")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Prompt too long; max {max_prompt_tokens} tokens",
+        )
+    cancel_event = threading.Event()
+    gen_timeout = float(os.getenv("CHAT_GENERATE_TIMEOUT_SEC", "60"))
+    generate_accepts_cancel = "cancel_event" in inspect.signature(model.generate).parameters
+    generate_prepared_accepts_cancel = hasattr(model, "generate_prepared") and "cancel_event" in inspect.signature(model.generate_prepared).parameters
+    batcher = getattr(request.app.state, "chat_batching_service", None)
+    stop = _normalize_stop(req.stop)
+
+    async def _run_generation() -> ChatGeneration:
+        if prepared_inputs is not None and hasattr(model, "generate_prepared"):
+            kwargs = {
+                "max_new_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "stop": stop,
+            }
+            if generate_prepared_accepts_cancel:
+                kwargs["cancel_event"] = cancel_event
+
+            return await loop.run_in_executor(
+                executor,
+                lambda: model.generate_prepared(
+                    prepared_inputs,
+                    **kwargs,
+                ),
+            )
+
+        kwargs = {
+            "max_new_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stop": stop,
+        }
+        if generate_accepts_cancel:
+            kwargs["cancel_event"] = cancel_event
+
+        return await loop.run_in_executor(
+            executor,
+            lambda: model.generate(
+                raw_messages,
+                **kwargs,
+            ),
+        )
+
+    async def _run_batched_or_fallback() -> ChatGeneration:
+        # Prefer chat batching when supported and no vision inputs; on
+        # internal errors fall back to per-request generation so the
+        # request can still succeed.
+        if (
+            batcher is not None
+            and getattr(batcher, "is_supported", lambda _m: False)(req.model)
+            and not has_images
+        ):
+            try:
+                return await batcher.enqueue(
+                    req.model,
+                    raw_messages,
+                    max_new_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stop=stop,
+                    prompt_tokens=prompt_tokens,
+                    prepared_inputs=prepared_inputs,
+                    cancel_event=cancel_event,
+                )
+            except ValueError as exc:
+                record_chat_request(req.model, "400")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(exc),
+                ) from exc
+            except ChatBatchQueueFullError as exc:
+                record_chat_request(req.model, "429")
+                logger.info(
+                    "chat_batch_queue_full", extra={"model": req.model, "status": 429}
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Chat batch queue full",
+                    headers={"Retry-After": str(int(QUEUE_TIMEOUT_SEC))},
+                ) from exc
+            except ChatBatchQueueTimeoutError as exc:
+                record_chat_request(req.model, "429")
+                logger.info(
+                    "chat_batch_queue_timeout", extra={"model": req.model, "status": 429}
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Chat batch queue wait exceeded",
+                    headers={"Retry-After": str(int(QUEUE_TIMEOUT_SEC))},
+                ) from exc
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning(
+                    "chat_batcher_failed_falling_back",
+                    extra={"model": req.model, "error": str(exc)},
+                )
+                # Fall back to per-request generation below.
+        return await _run_generation()
+
+    work_task = asyncio.ensure_future(_run_batched_or_fallback())
+    try:
+        generation = await _run_work_with_client_cancel(
+            request=request,
+            work_task=work_task,
+            cancel_event=cancel_event,
+            timeout=gen_timeout,
+        )
+    except _WorkTimeoutError as exc:
+        cancel_event.set()
+        record_chat_request(req.model, "504")
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Chat generation timed out",
+        ) from exc
+    except _RequestCancelledError as exc:
+        cancel_event.set()
+        record_chat_request(req.model, "499")
+        raise HTTPException(
+            status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
+            detail="Request cancelled",
+        ) from exc
+    except _ClientDisconnectedError as exc:
+        cancel_event.set()
+        record_chat_request(req.model, "499")
+        raise HTTPException(
+            status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
+            detail="Client disconnected",
+        ) from exc
+    except HTTPException:
+        # Propagate HTTPExceptions produced inside the generation helpers
+        # unchanged so status codes and metrics stay local.
+        raise
+    except Exception as exc:  # pragma: no cover - unexpected runtime failure
+        cancel_event.set()
+        record_chat_request(req.model, "500")
+        logger.exception(
+            "chat_generation_failed",
+            extra={"model": req.model, "max_tokens": max_tokens, "status": 500},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Chat generation failed",
+        ) from exc
+
+    return generation, int(prompt_tokens), int(max_tokens)
+
+
 async def _save_upload(file: UploadFile, max_bytes: int = MAX_AUDIO_BYTES) -> tuple[str, int]:
     """Persist UploadFile to a temp file and enforce size guard."""
     suffix = Path(file.filename or "").suffix or ".wav"
@@ -267,13 +453,12 @@ def _probe_duration(path: str) -> float | None:
 
 
 def _resolve_warmup_status(request: Request | None) -> WarmupStatus:
-    if request is not None:
-        status_obj = getattr(request.app.state, "warmup_status", None)
-        if isinstance(status_obj, WarmupStatus):
-            return status_obj
+    if request is None:
+        return WarmupStatus()
 
-    if isinstance(global_warmup_status, WarmupStatus):
-        return global_warmup_status
+    status_obj = getattr(request.app.state, "warmup_status", None)
+    if isinstance(status_obj, WarmupStatus):
+        return status_obj
 
     return WarmupStatus()
 
@@ -460,8 +645,100 @@ async def _build_embedding_usage(model: Any, texts: list[str]) -> Usage:
     return Usage(prompt_tokens=prompt_tokens, total_tokens=prompt_tokens, completion_tokens=None)
 
 
+async def _run_embedding_generation(  # noqa: PLR0913
+    *,
+    registry: ModelRegistry,
+    model_name: str,
+    texts: list[str],
+    request: Request,
+    cancel_event: threading.Event,
+    timeout: float,
+) -> Any:
+    """Resolve model and run embedding generation with batching/timeout/cancellation.
+
+    This keeps the embedding route focused on request validation, metrics, and
+    queue-level errors while centralising the execution and error mapping here.
+    """
+
+    try:
+        model = registry.get(model_name)
+    except KeyError as exc:
+        record_request(model_name, "404")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model {model_name} not found",
+        ) from exc
+
+    try:
+        batcher = getattr(request.app.state, "batching_service", None)
+        loop = asyncio.get_running_loop()
+        if batcher is not None and getattr(batcher, "enabled", False):
+            work_task = asyncio.ensure_future(
+                batcher.enqueue(model_name, texts, cancel_event=cancel_event)
+            )
+        else:
+            executor = get_embedding_executor()
+            work_task = asyncio.ensure_future(
+                loop.run_in_executor(
+                    executor,
+                    lambda: model.embed(texts, cancel_event=cancel_event),
+                )
+            )
+        return await _run_work_with_client_cancel(
+            request=request,
+            work_task=work_task,
+            cancel_event=cancel_event,
+            timeout=timeout,
+        )
+    except _WorkTimeoutError as exc:
+        cancel_event.set()
+        record_request(model_name, "504")
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Embedding generation timed out",
+        ) from exc
+    except _RequestCancelledError as exc:
+        cancel_event.set()
+        record_request(model_name, "499")
+        raise HTTPException(
+            status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
+            detail="Request cancelled",
+        ) from exc
+    except _ClientDisconnectedError as exc:
+        cancel_event.set()
+        record_request(model_name, "499")
+        raise HTTPException(
+            status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
+            detail="Client disconnected",
+        ) from exc
+    except EmbeddingBatchQueueTimeoutError as exc:
+        record_request(model_name, "429")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Embedding batch queue wait exceeded",
+            headers={"Retry-After": str(int(QUEUE_TIMEOUT_SEC))},
+        ) from exc
+    except Exception as exc:  # pragma: no cover - unexpected runtime failure
+        record_request(model_name, "500")
+        logger.exception(
+            "embedding_failed",
+            extra={
+                "model": model_name,
+                "batch_size": len(texts),
+                # Model may not expose device attribute; use getattr defensively.
+                "device": getattr(registry.get(model_name), "device", None)
+                if model_name in registry.list_models()
+                else None,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Embedding generation failed",
+        ) from exc
+
+
 @router.post("/v1/embeddings", response_model=EmbeddingResponse)
-async def create_embeddings(  # noqa: PLR0912, PLR0915
+async def create_embeddings(  # noqa: PLR0912
     req: EmbeddingRequest,
     registry: Annotated[ModelRegistry, Depends(get_model_registry)],
     request: Request,
@@ -473,78 +750,14 @@ async def create_embeddings(  # noqa: PLR0912, PLR0915
     label_token = set_queue_label(req.model or "embedding")
     try:
         async with limiter():
-            try:
-                model = registry.get(req.model)
-            except KeyError as exc:
-                record_request(req.model, "404")
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Model {req.model} not found",
-                ) from exc
-
-            try:
-                batcher = getattr(request.app.state, "batching_service", None)
-                loop = asyncio.get_running_loop()
-                if batcher is not None and getattr(batcher, "enabled", False):
-                    work_task = asyncio.ensure_future(
-                        batcher.enqueue(req.model, texts, cancel_event=cancel_event)
-                    )
-                else:
-                    executor = get_embedding_executor()
-                    work_task = asyncio.ensure_future(
-                        loop.run_in_executor(
-                            executor,
-                            lambda: model.embed(texts, cancel_event=cancel_event),
-                        )
-                    )
-                vectors = await _run_work_with_client_cancel(
-                    request=request,
-                    work_task=work_task,
-                    cancel_event=cancel_event,
-                    timeout=embed_timeout,
-                )
-            except _WorkTimeoutError as exc:
-                cancel_event.set()
-                record_request(req.model, "504")
-                raise HTTPException(
-                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                    detail="Embedding generation timed out",
-                ) from exc
-            except _RequestCancelledError as exc:
-                cancel_event.set()
-                record_request(req.model, "499")
-                raise HTTPException(
-                    status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
-                    detail="Request cancelled",
-                ) from exc
-            except _ClientDisconnectedError as exc:
-                cancel_event.set()
-                record_request(req.model, "499")
-                raise HTTPException(
-                    status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
-                    detail="Client disconnected",
-                ) from exc
-            except EmbeddingBatchQueueTimeoutError as exc:
-                record_request(req.model, "429")
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="Embedding batch queue wait exceeded",
-                    headers={"Retry-After": str(int(QUEUE_TIMEOUT_SEC))},
-                ) from exc
-            except Exception as exc:  # pragma: no cover - unexpected runtime failure
-                record_request(req.model, "500")
-                logger.exception(
-                    "embedding_failed",
-                    extra={
-                        "model": req.model,
-                        "batch_size": len(texts),
-                        "device": getattr(model, "device", None),
-                    },
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Embedding generation failed",
-                ) from exc
+            vectors = await _run_embedding_generation(
+                registry=registry,
+                model_name=req.model,
+                texts=texts,
+                request=request,
+                cancel_event=cancel_event,
+                timeout=embed_timeout,
+            )
     except QueueFullError as exc:
         record_request(req.model, "429")
         raise HTTPException(
@@ -584,12 +797,14 @@ async def create_embeddings(  # noqa: PLR0912, PLR0915
     data = [
         EmbeddingObject(index=i, embedding=vec.tolist()) for i, vec in enumerate(vectors)
     ]
-    usage = await _build_embedding_usage(model, texts)
+    # Reuse the same underlying model instance for usage token accounting.
+    usage_model = registry.get(req.model)
+    usage = await _build_embedding_usage(usage_model, texts)
     return EmbeddingResponse(data=data, model=req.model, usage=usage)
 
 
 @router.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-async def create_chat_completions(  # noqa: PLR0915, PLR0912
+async def create_chat_completions(  # noqa: PLR0912
     req: ChatCompletionRequest,
     registry: Annotated[ModelRegistry, Depends(get_model_registry)],
     _request: Request,
@@ -605,181 +820,19 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
             detail="Only n=1 is supported",
         )
 
-    raw_messages = [msg.model_dump(mode="python") for msg in req.messages]
-    has_images = _contains_image_content(raw_messages)
-    stop = _normalize_stop(req.stop)
-
     start = time.perf_counter()
     label_token = set_queue_label(req.model or "chat")
     try:
         async with limiter():
-            model = _resolve_chat_model_and_caps(registry, req.model, has_images=has_images)
-
-            defaults = getattr(model, "generation_defaults", {}) or {}
-            max_tokens_default = defaults.get("max_tokens") or int(os.getenv("MAX_NEW_TOKENS", "512"))
-            temperature_default = defaults.get("temperature", 0.7)
-            top_p_default = defaults.get("top_p", 0.9)
-
-            max_tokens = req.max_tokens or max_tokens_default
-            if max_tokens <= 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="max_tokens must be positive",
-                )
-            temperature = req.temperature if req.temperature is not None else temperature_default
-            top_p = req.top_p if req.top_p is not None else top_p_default
-
-            loop = asyncio.get_running_loop()
-            executor = get_chat_executor()
-            max_prompt_tokens = int(os.getenv("CHAT_MAX_PROMPT_TOKENS", "4096"))
-            prepared_inputs, prompt_tokens = await _prepare_chat_request(model, raw_messages)
-            if prompt_tokens > max_prompt_tokens:
-                record_chat_request(req.model, "400")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Prompt too long; max {max_prompt_tokens} tokens",
-                )
-            cancel_event = threading.Event()
-            gen_timeout = float(os.getenv("CHAT_GENERATE_TIMEOUT_SEC", "60"))
-            generate_accepts_cancel = "cancel_event" in inspect.signature(model.generate).parameters
-            generate_prepared_accepts_cancel = hasattr(model, "generate_prepared") and "cancel_event" in inspect.signature(model.generate_prepared).parameters
-            batcher = getattr(_request.app.state, "chat_batching_service", None)
-
-            async def _run_generation() -> ChatGeneration:
-                if prepared_inputs is not None and hasattr(model, "generate_prepared"):
-                    kwargs = {
-                        "max_new_tokens": max_tokens,
-                        "temperature": temperature,
-                        "top_p": top_p,
-                        "stop": stop,
-                    }
-                    if generate_prepared_accepts_cancel:
-                        kwargs["cancel_event"] = cancel_event
-
-                    return await loop.run_in_executor(
-                        executor,
-                        lambda: model.generate_prepared(
-                            prepared_inputs,
-                            **kwargs,
-                        ),
-                    )
-
-                kwargs = {
-                    "max_new_tokens": max_tokens,
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "stop": stop,
-                }
-                if generate_accepts_cancel:
-                    kwargs["cancel_event"] = cancel_event
-
-                return await loop.run_in_executor(
-                    executor,
-                    lambda: model.generate(
-                        raw_messages,
-                        **kwargs,
-                    ),
-                )
-
-            async def _run_batched_or_fallback() -> ChatGeneration:
-                # Prefer chat batching when supported and no vision inputs; on
-                # internal errors fall back to per-request generation so the
-                # request can still succeed.
-                if (
-                    batcher is not None
-                    and getattr(batcher, "is_supported", lambda _m: False)(req.model)
-                    and not has_images
-                ):
-                    try:
-                        return await batcher.enqueue(
-                            req.model,
-                            raw_messages,
-                            max_new_tokens=max_tokens,
-                            temperature=temperature,
-                            top_p=top_p,
-                            stop=stop,
-                            prompt_tokens=prompt_tokens,
-                            prepared_inputs=prepared_inputs,
-                            cancel_event=cancel_event,
-                        )
-                    except ValueError as exc:
-                        record_chat_request(req.model, "400")
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=str(exc),
-                        ) from exc
-                    except ChatBatchQueueFullError as exc:
-                        record_chat_request(req.model, "429")
-                        logger.info(
-                            "chat_batch_queue_full", extra={"model": req.model, "status": 429}
-                        )
-                        raise HTTPException(
-                            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                            detail="Chat batch queue full",
-                            headers={"Retry-After": str(int(QUEUE_TIMEOUT_SEC))},
-                        ) from exc
-                    except ChatBatchQueueTimeoutError as exc:
-                        record_chat_request(req.model, "429")
-                        logger.info(
-                            "chat_batch_queue_timeout", extra={"model": req.model, "status": 429}
-                        )
-                        raise HTTPException(
-                            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                            detail="Chat batch queue wait exceeded",
-                            headers={"Retry-After": str(int(QUEUE_TIMEOUT_SEC))},
-                        ) from exc
-                    except Exception as exc:  # pragma: no cover - defensive fallback
-                        logger.warning(
-                            "chat_batcher_failed_falling_back",
-                            extra={"model": req.model, "error": str(exc)},
-                        )
-                        # Fall back to per-request generation below.
-                return await _run_generation()
-
-            work_task = asyncio.ensure_future(_run_batched_or_fallback())
-            try:
-                generation = await _run_work_with_client_cancel(
-                    request=_request,
-                    work_task=work_task,
-                    cancel_event=cancel_event,
-                    timeout=gen_timeout,
-                )
-            except _WorkTimeoutError as exc:
-                cancel_event.set()
-                record_chat_request(req.model, "504")
-                raise HTTPException(
-                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                    detail="Chat generation timed out",
-                ) from exc
-            except _RequestCancelledError as exc:
-                cancel_event.set()
-                record_chat_request(req.model, "499")
-                raise HTTPException(
-                    status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
-                    detail="Request cancelled",
-                ) from exc
-            except _ClientDisconnectedError as exc:
-                cancel_event.set()
-                record_chat_request(req.model, "499")
-                raise HTTPException(
-                    status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
-                    detail="Client disconnected",
-                ) from exc
-            except HTTPException:
-                # Propagate HTTPExceptions produced inside the generation
-                # helpers unchanged so status codes and metrics stay local.
-                raise
-            except Exception as exc:  # pragma: no cover - unexpected runtime failure
-                cancel_event.set()
-                record_chat_request(req.model, "500")
-                logger.exception(
-                    "chat_generation_failed",
-                    extra={"model": req.model, "max_tokens": max_tokens, "status": 500},
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Chat generation failed",
-                ) from exc
+            raw_messages = [msg.model_dump(mode="python") for msg in req.messages]
+            has_images = _contains_image_content(raw_messages)
+            generation, prompt_tokens, max_tokens = await _run_chat_generation(
+                req=req,
+                registry=registry,
+                request=_request,
+                raw_messages=raw_messages,
+                has_images=has_images,
+            )
     except QueueFullError as exc:
         record_chat_request(req.model, "429")
         raise HTTPException(
@@ -939,9 +992,7 @@ async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
             loop = asyncio.get_running_loop()
             executor = get_audio_executor()
             duration = await loop.run_in_executor(executor, lambda: _probe_duration(temp_path))
-
             model = _resolve_audio_model_and_caps(registry, model_name)
-
             try:
                 work_task: asyncio.Future[Any] = asyncio.ensure_future(
                     loop.run_in_executor(

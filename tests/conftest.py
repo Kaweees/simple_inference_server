@@ -81,6 +81,20 @@ class _StoppingCriteria:  # pragma: no cover - stub type only
 class _StoppingCriteriaList(list):  # pragma: no cover - stub type only
     pass
 
+class _DummyTokenizer:  # pragma: no cover - stub type only
+    pad_token_id: int | None = 0
+    eos_token_id: int | None = 0
+
+    def encode(self, _text: Any, add_special_tokens: bool = False) -> list[int]:
+        return []
+
+    def apply_chat_template(self, *args: Any, **kwargs: Any) -> Any:
+        return {"input_ids": types.SimpleNamespace(shape=(1, 0)), "to": lambda self, *_: self}
+
+    def batch_decode(self, ids: Any, skip_special_tokens: bool = True) -> list[str]:
+        return [""]
+
+
 class _DummyProcessor:  # pragma: no cover - stub type only
     tokenizer: Any = types.SimpleNamespace(encode=lambda *a, **k: [])
 
@@ -112,6 +126,7 @@ class _DummyModel:  # pragma: no cover - stub type only
 
 _transformers.AutoModelForCausalLM = _DummyModel
 _transformers.AutoProcessor = _DummyProcessor
+_transformers.AutoTokenizer = _DummyTokenizer
 _transformers.StoppingCriteria = _StoppingCriteria
 _transformers.StoppingCriteriaList = _StoppingCriteriaList
 _transformers.WhisperForConditionalGeneration = _DummyModel

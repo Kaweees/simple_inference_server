@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import contextlib
 import importlib
 import io
 import logging
@@ -20,41 +21,11 @@ from PIL import Image
 from transformers import AutoProcessor, StoppingCriteria, StoppingCriteriaList
 
 from app.models.base import ChatGeneration, ChatModel
+from app.models.generation_utils import StopOnCancel, StopOnTokens, trim_with_stop
 
 logger = logging.getLogger(__name__)
 _HTTP_CLIENT: httpx.Client | None = None
 _HTTP_CLIENT_LOCK = threading.Lock()
-
-
-class _StopOnTokens(StoppingCriteria):
-    """Stop generation when any of the provided token sequences is produced."""
-
-    def __init__(self, stop_token_ids: list[list[int]]) -> None:
-        super().__init__()
-        # Keep only non-empty stop sequences
-        self.stop_token_ids = [ids for ids in stop_token_ids if ids]
-        self.triggered = False
-
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any) -> bool:
-        if not self.stop_token_ids:
-            return False
-        generated = input_ids[0].tolist()
-        for ids in self.stop_token_ids:
-            if len(ids) <= len(generated) and generated[-len(ids) :] == ids:
-                self.triggered = True
-                return True
-        return False
-
-
-class _StopOnCancel(StoppingCriteria):
-    """Stop generation when a cancellation event is set."""
-
-    def __init__(self, event: threading.Event) -> None:
-        super().__init__()
-        self.event = event
-
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any) -> bool:  # noqa: D401
-        return self.event.is_set()
 
 
 class QwenVLChat(ChatModel):
@@ -125,8 +96,11 @@ class QwenVLChat(ChatModel):
             if stop_criteria is not None:
                 generation_kwargs["stopping_criteria"] = stop_criteria
 
-            with torch.inference_mode():
-                output_ids = self.model.generate(**inputs, **generation_kwargs)
+            try:
+                with torch.inference_mode():
+                    output_ids = self.model.generate(**inputs, **generation_kwargs)
+            except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError) as exc:
+                self._handle_oom(exc)
 
             generated_ids = output_ids[:, prompt_len:]
             completion_tokens = int(generated_ids.shape[1])
@@ -134,7 +108,7 @@ class QwenVLChat(ChatModel):
             stop_hit = bool(stop_flag and stop_flag.triggered)
 
             text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            text, trimmed = self._trim_with_stop(text, stop)
+            text, trimmed = trim_with_stop(text, stop)
             if trimmed:
                 stop_hit = True
 
@@ -169,8 +143,11 @@ class QwenVLChat(ChatModel):
             if stop_criteria is not None:
                 generation_kwargs["stopping_criteria"] = stop_criteria
 
-            with torch.inference_mode():
-                output_ids = self.model.generate(**inputs, **generation_kwargs)
+            try:
+                with torch.inference_mode():
+                    output_ids = self.model.generate(**inputs, **generation_kwargs)
+            except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError) as exc:
+                self._handle_oom(exc)
 
             generated_ids = output_ids[:, prompt_len:]
             completion_tokens = int(generated_ids.shape[1])
@@ -178,7 +155,7 @@ class QwenVLChat(ChatModel):
             stop_hit = bool(stop_flag and stop_flag.triggered)
 
             text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            text, trimmed = self._trim_with_stop(text, stop)
+            text, trimmed = trim_with_stop(text, stop)
             if trimmed:
                 stop_hit = True
 
@@ -300,20 +277,35 @@ class QwenVLChat(ChatModel):
     # ----------- Helpers ----------------------------------------------------
     def _build_stop_criteria(
         self, stop: list[str] | None, cancel_event: threading.Event | None
-    ) -> tuple[StoppingCriteriaList | None, _StopOnTokens | None]:
+    ) -> tuple[StoppingCriteriaList | None, StopOnTokens | None]:
         criteria: list[StoppingCriteria] = []
         stopper = None
         if stop:
             stop_token_ids = [
                 self.processor.tokenizer.encode(s, add_special_tokens=False) for s in stop if s
             ]
-            stopper = _StopOnTokens(stop_token_ids)
+            stopper = StopOnTokens(stop_token_ids)
             criteria.append(stopper)
         if cancel_event is not None:
-            criteria.append(_StopOnCancel(cancel_event))
+            criteria.append(StopOnCancel(cancel_event))
         if not criteria:
             return None, stopper
         return StoppingCriteriaList(criteria), stopper
+
+    def _handle_oom(self, exc: BaseException) -> None:
+        """Handle CUDA OOM in a consistent, recoverable way."""
+
+        logger.exception(
+            "chat_generate_oom",
+            extra={
+                "model": self.hf_repo_id,
+                "device": str(getattr(self.model, "device", "unknown")),
+            },
+        )
+        if torch.cuda.is_available():
+            with contextlib.suppress(Exception):
+                torch.cuda.empty_cache()
+        raise exc
 
     def _normalize_chat_template_output(self, raw_inputs: Any) -> dict[str, torch.Tensor]:
         """Normalize processor outputs to a plain dict of tensors.
@@ -385,26 +377,6 @@ class QwenVLChat(ChatModel):
         else:
             raise ValueError("content must be a string or list of content parts")
         return parts
-
-    @staticmethod
-    def _trim_with_stop(text: str, stop: list[str] | None) -> tuple[str, bool]:
-        """Trim the generated text at the earliest occurrence of any stop string."""
-
-        if not stop:
-            return text, False
-
-        earliest_idx: int | None = None
-        for s in stop:
-            if not s:
-                continue
-            idx = text.find(s)
-            if idx != -1 and (earliest_idx is None or idx < earliest_idx):
-                earliest_idx = idx
-
-        if earliest_idx is None:
-            return text, False
-
-        return text[:earliest_idx].rstrip(), True
 
     def _load_image(self, source: str) -> Image.Image:
         """Load an image from a data URI, remote URL, or local path.
