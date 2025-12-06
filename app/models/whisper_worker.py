@@ -43,7 +43,7 @@ def _worker_loop(conn: multiprocessing.connection.Connection, hf_repo_id: str, d
             tokenizer=processor.tokenizer,
             feature_extractor=processor.feature_extractor,
             device=-1 if dev.type == "cpu" else dev,
-            torch_dtype=model.dtype,
+            dtype=model.dtype,
         )
     except Exception as exc:  # pragma: no cover - defensive
         conn.send({"err": f"init_failed: {exc}", "trace": traceback.format_exc()})

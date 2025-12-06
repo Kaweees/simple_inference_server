@@ -72,7 +72,7 @@ class WhisperASR(SpeechModel):
             tokenizer=self.processor.tokenizer,
             feature_extractor=self.processor.feature_extractor,
             device=self._pipeline_device_arg(),
-            torch_dtype=self.model.dtype,
+            dtype=self.model.dtype,
         )
 
         # Optional hard-kill path: run transcribe inside a dedicated worker process.
