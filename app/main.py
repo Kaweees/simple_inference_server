@@ -358,6 +358,10 @@ async def shutdown(
     shutdown_executors()
 
 
+# Flag to prevent recursive lifespan invocation during API warmup
+_in_api_warmup = False
+
+
 def _warmup_api_routes(app: FastAPI, registry: ModelRegistry) -> None:
     """Send warmup requests through the full API stack.
 
@@ -366,7 +370,12 @@ def _warmup_api_routes(app: FastAPI, registry: ModelRegistry) -> None:
     - Pydantic validation
     - Python bytecode compilation for route handlers
     - Batching service queue paths
+
+    IMPORTANT: TestClient triggers lifespan, so we use a flag to prevent
+    recursive model loading.
     """
+    global _in_api_warmup  # noqa: PLW0603
+
     warmup_steps = settings.warmup_steps
     if warmup_steps <= 0 or not settings.enable_warmup:
         return
@@ -383,36 +392,46 @@ def _warmup_api_routes(app: FastAPI, registry: ModelRegistry) -> None:
 
     logger.info("api_warmup_start", extra={"models": embedding_models, "steps": warmup_steps})
 
-    with TestClient(app, raise_server_exceptions=False) as client:
-        for model_name in embedding_models:
-            for step in range(warmup_steps):
-                try:
-                    start = time.perf_counter()
-                    resp = client.post(
-                        "/v1/embeddings",
-                        json={"model": model_name, "input": "warmup"},
-                    )
-                    duration_ms = round((time.perf_counter() - start) * 1000, 2)
-                    logger.info(
-                        "api_warmup_step",
-                        extra={
-                            "model": model_name,
-                            "step": step + 1,
-                            "status": resp.status_code,
-                            "latency_ms": duration_ms,
-                        },
-                    )
-                except Exception:  # pragma: no cover - defensive
-                    logger.exception(
-                        "api_warmup_error",
-                        extra={"model": model_name, "step": step + 1},
-                    )
+    _in_api_warmup = True
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            for model_name in embedding_models:
+                for step in range(warmup_steps):
+                    try:
+                        start = time.perf_counter()
+                        resp = client.post(
+                            "/v1/embeddings",
+                            json={"model": model_name, "input": "warmup"},
+                        )
+                        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+                        logger.info(
+                            "api_warmup_step",
+                            extra={
+                                "model": model_name,
+                                "step": step + 1,
+                                "status": resp.status_code,
+                                "latency_ms": duration_ms,
+                            },
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception(
+                            "api_warmup_error",
+                            extra={"model": model_name, "step": step + 1},
+                        )
+    finally:
+        _in_api_warmup = False
 
     logger.info("api_warmup_completed")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # When TestClient is used for API warmup, it triggers lifespan again.
+    # Skip the heavy startup in that case - we just need to yield.
+    if _in_api_warmup:
+        yield
+        return
+
     registry = None
     batching_service = None
     chat_batching_service = None
