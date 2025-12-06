@@ -2,7 +2,6 @@ import importlib.util
 import logging
 import os
 import shutil
-import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,7 +12,6 @@ import torch
 import yaml
 from fastapi import FastAPI
 from huggingface_hub import snapshot_download
-from starlette.testclient import TestClient
 
 from app import state, warmup
 from app.api import router as api_router
@@ -358,80 +356,8 @@ async def shutdown(
     shutdown_executors()
 
 
-# Flag to prevent recursive lifespan invocation during API warmup
-_in_api_warmup = False
-
-
-def _warmup_api_routes(app: FastAPI, registry: ModelRegistry) -> None:
-    """Send warmup requests through the full API stack.
-
-    Uses FastAPI's TestClient to exercise routes in-process, warming up:
-    - FastAPI routing and middleware
-    - Pydantic validation
-    - Python bytecode compilation for route handlers
-    - Batching service queue paths
-
-    IMPORTANT: TestClient triggers lifespan, so we use a flag to prevent
-    recursive model loading.
-    """
-    global _in_api_warmup  # noqa: PLW0603
-
-    warmup_steps = settings.warmup_steps
-    if warmup_steps <= 0 or not settings.enable_warmup:
-        return
-
-    # Find embedding models to warm up
-    embedding_models = [
-        name for name in registry.list_models()
-        if "text-embedding" in getattr(registry.get(name), "capabilities", [])
-    ]
-
-    if not embedding_models:
-        logger.info("api_warmup_skip", extra={"reason": "no_embedding_models"})
-        return
-
-    logger.info("api_warmup_start", extra={"models": embedding_models, "steps": warmup_steps})
-
-    _in_api_warmup = True
-    try:
-        with TestClient(app, raise_server_exceptions=False) as client:
-            for model_name in embedding_models:
-                for step in range(warmup_steps):
-                    try:
-                        start = time.perf_counter()
-                        resp = client.post(
-                            "/v1/embeddings",
-                            json={"model": model_name, "input": "warmup"},
-                        )
-                        duration_ms = round((time.perf_counter() - start) * 1000, 2)
-                        logger.info(
-                            "api_warmup_step",
-                            extra={
-                                "model": model_name,
-                                "step": step + 1,
-                                "status": resp.status_code,
-                                "latency_ms": duration_ms,
-                            },
-                        )
-                    except Exception:  # pragma: no cover - defensive
-                        logger.exception(
-                            "api_warmup_error",
-                            extra={"model": model_name, "step": step + 1},
-                        )
-    finally:
-        _in_api_warmup = False
-
-    logger.info("api_warmup_completed")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # When TestClient is used for API warmup, it triggers lifespan again.
-    # Skip the heavy startup in that case - we just need to yield.
-    if _in_api_warmup:
-        yield
-        return
-
     registry = None
     batching_service = None
     chat_batching_service = None
@@ -453,12 +379,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if chat_batching_service is not None:
             await chat_batching_service.start()
             logger.info("chat_batchers_started")
-
-        # Warm up the full API stack with test requests.
-        # This exercises FastAPI routing, Pydantic validation, and the
-        # complete request path to eliminate first-request latency.
-        if registry is not None:
-            _warmup_api_routes(app, registry)
 
         yield
     finally:
