@@ -9,7 +9,6 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from app.batching import EmbeddingBatchQueueTimeoutError
 from app.concurrency.limiter import (
     EMBEDDING_QUEUE_TIMEOUT_SEC,
     QueueFullError,
@@ -82,14 +81,8 @@ async def create_rerank(  # noqa: PLR0915
                 detail=f"Model {model_name} does not support rerank",
             )
 
-        batching_service = getattr(request.app.state, "batching_service", None)
-
         async def _run_rerank_work() -> list[RerankResponseResult]:
-            if batching_service is not None and model_name in getattr(batching_service, "_rerank_batchers", {}):
-                return await batching_service.enqueue_rerank(
-                    model_name, req.query, req.documents, req.top_n, cancel_event=cancel_event
-                )
-
+            # Rerank uses direct executor path (batching not implemented for rerank)
             executor = get_embedding_executor()
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
@@ -128,13 +121,6 @@ async def create_rerank(  # noqa: PLR0915
                 raise HTTPException(
                     status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
                     detail="Client disconnected",
-                ) from exc
-            except EmbeddingBatchQueueTimeoutError as exc:
-                record_rerank_request(model_name, "429")
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="Rerank batch queue wait exceeded",
-                    headers={"Retry-After": str(int(EMBEDDING_QUEUE_TIMEOUT_SEC))},
                 ) from exc
             except HTTPException:
                 raise
