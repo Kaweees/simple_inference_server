@@ -27,8 +27,11 @@ from app.models.generation_utils import (
 )
 from app.utils.remote_code import require_trust_remote_code
 
+from app.utils.env import get_token
+
 logger = logging.getLogger(__name__)
 
+hf_token = get_token("HF_TOKEN")
 
 class TextChatModel(ChatModel):
     """Generic text-only chat handler using HF chat template."""
@@ -45,7 +48,8 @@ class TextChatModel(ChatModel):
             hf_repo_id,
             trust_remote_code=trust_remote_code,
             local_files_only=True,
-            cache_dir=os.environ.get("HF_HOME"),
+            cache_dir=get_token("HF_HOME"),
+            token=hf_token,
         )
         # Ensure padding is defined for batched generation; fall back to EOS when absent.
         if self.tokenizer.pad_token_id is None:
@@ -58,7 +62,8 @@ class TextChatModel(ChatModel):
             hf_repo_id,
             trust_remote_code=trust_remote_code,
             local_files_only=True,
-            cache_dir=os.environ.get("HF_HOME"),
+            cache_dir=get_token("HF_HOME"),
+            token=hf_token,
             device_map=device_map,
             dtype="auto",
         )

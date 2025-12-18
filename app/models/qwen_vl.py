@@ -30,6 +30,9 @@ from app.models.generation_utils import (
 )
 from app.monitoring.metrics import record_remote_image_rejection
 from app.utils.remote_code import require_trust_remote_code
+from app.utils.env import get_token
+
+hf_token = get_token("HF_TOKEN")
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +50,7 @@ class QwenVLChat(ChatModel):
         self._gen_lock = threading.RLock()
         self.thread_safe = True
         models_dir = Path(__file__).resolve().parent.parent.parent / "models"
-        self.cache_dir = str(models_dir) if models_dir.exists() else os.environ.get("HF_HOME")
+        self.cache_dir = str(models_dir) if models_dir.exists() else get_token("HF_HOME")
 
         device_map = self._resolve_device_map(device)
         trust_remote_code = require_trust_remote_code(hf_repo_id, model_name=hf_repo_id)
@@ -63,6 +66,7 @@ class QwenVLChat(ChatModel):
             trust_remote_code=trust_remote_code,
             local_files_only=True,
             cache_dir=self.cache_dir,
+            token=hf_token,
         )
         model_cls: Any = self._resolve_model_cls()
         self.model = model_cls.from_pretrained(

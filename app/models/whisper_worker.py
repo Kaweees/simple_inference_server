@@ -8,6 +8,9 @@ from typing import Any
 import torch
 from transformers import WhisperForConditionalGeneration, WhisperProcessor, pipeline
 
+from app.utils.env import get_token
+
+hf_token = get_token("HF_TOKEN")
 
 def _worker_loop(conn: multiprocessing.connection.Connection, hf_repo_id: str, device: str) -> None:
     """Subprocess loop owning a Whisper pipeline.
@@ -22,12 +25,14 @@ def _worker_loop(conn: multiprocessing.connection.Connection, hf_repo_id: str, d
         processor = WhisperProcessor.from_pretrained(
             hf_repo_id,
             local_files_only=True,
-            cache_dir=os.environ.get("HF_HOME"),
+            cache_dir=get_token("HF_HOME"),
+            token=hf_token,
         )
         model = WhisperForConditionalGeneration.from_pretrained(
             hf_repo_id,
             local_files_only=True,
-            cache_dir=os.environ.get("HF_HOME"),
+            cache_dir=get_token("HF_HOME"),
+            token=hf_token,
         )
         dev = torch.device(device)
         if dev.type == "cuda":

@@ -32,12 +32,12 @@ pre_commit:
   @uv run pre-commit run -a
 
 # Download models
-download models="BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507":
+download models="LiquidAI/LFM2-1.2B,Qwen/Qwen2.5-1.5B-Instruct,Qwen/Qwen3-4B-Instruct-2507,meta-llama/Llama-3.2-1B-Instruct,meta-llama/Llama-3.2-3B-Instruct,openai/gpt-oss-120b":
   @echo "Downloading models..."
   @MODELS={{models}} uv run python scripts/download_models.py
 
 # Run the server
-run models="BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507":
+run models="LiquidAI/LFM2-1.2B,Qwen/Qwen2.5-1.5B-Instruct,Qwen/Qwen3-4B-Instruct-2507,meta-llama/Llama-3.2-1B-Instruct,meta-llama/Llama-3.2-3B-Instruct,openai/gpt-oss-120b":
   @echo "Running the server..."
   @MODELS={{models}} uv run python scripts/run_dev.py --device auto
 

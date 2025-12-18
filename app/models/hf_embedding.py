@@ -13,6 +13,10 @@ from app.config import settings
 from app.embedding_cache import EmbeddingCache, embed_with_cache
 from app.models.base import EmbeddingModel
 
+from app.utils.env import get_token
+
+hf_token = get_token("HF_TOKEN")
+
 
 class HFEmbeddingModel(EmbeddingModel):
     """Shared Hugging Face embedding implementation with L2-normalized mean pooling."""
@@ -26,7 +30,7 @@ class HFEmbeddingModel(EmbeddingModel):
         self.thread_safe = True
 
         models_dir = Path(__file__).resolve().parent.parent.parent / "models"
-        self.cache_dir = str(models_dir) if models_dir.exists() else os.environ.get("HF_HOME")
+        self.cache_dir = str(models_dir) if models_dir.exists() else get_token("HF_HOME")
 
         self._cache = EmbeddingCache(max_size=max(settings.embedding_cache_size, 0))
 
@@ -35,11 +39,13 @@ class HFEmbeddingModel(EmbeddingModel):
             hf_repo_id,
             local_files_only=True,
             cache_dir=self.cache_dir,
+            token=hf_token,
         )
         self.model = AutoModel.from_pretrained(
             hf_repo_id,
             local_files_only=True,
             cache_dir=self.cache_dir,
+            token=hf_token,
         ).to(self.device)
         self.model.eval()
         self.dim = self.model.config.hidden_size
@@ -107,6 +113,7 @@ class HFEmbeddingModel(EmbeddingModel):
                 self.hf_repo_id,
                 local_files_only=True,
                 cache_dir=self.cache_dir,
+                token=hf_token,
             )
             self._tokenizer_local.tokenizer = tok
         return tok

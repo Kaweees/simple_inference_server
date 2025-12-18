@@ -27,9 +27,11 @@ from app.monitoring.metrics import (
     record_whisper_restart,
 )
 from app.utils.device import resolve_torch_device
+from app.utils.env import get_token
 
 logger = logging.getLogger(__name__)
 
+hf_token = get_token("HF_TOKEN")
 
 class WhisperASR(SpeechModel):
     """Whisper speech-to-text handler with OpenAI-style behavior."""
@@ -45,17 +47,19 @@ class WhisperASR(SpeechModel):
         self.thread_safe = False
 
         models_dir = Path(__file__).resolve().parent.parent.parent / "models"
-        cache_dir = str(models_dir) if models_dir.exists() else os.environ.get("HF_HOME")
+        cache_dir = str(models_dir) if models_dir.exists() else get_token("HF_HOME")
 
         self.processor = WhisperProcessor.from_pretrained(
             hf_repo_id,
             local_files_only=True,
             cache_dir=cache_dir,
+            token=hf_token,
         )
         self.model = WhisperForConditionalGeneration.from_pretrained(
             hf_repo_id,
             local_files_only=True,
             cache_dir=cache_dir,
+            token=hf_token,
         )
         # Move to device and prefer half precision on CUDA.
         if self.device.type == "cuda":
