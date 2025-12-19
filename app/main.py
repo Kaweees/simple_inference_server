@@ -47,6 +47,10 @@ from app.threadpool import (
 )
 from app.warmup import warm_up_models
 
+from app.utils.env import get_token
+
+hf_token = get_token("HF_TOKEN")
+
 logger = logging.getLogger(__name__)
 
 # Mapping from capability to executor kind for thread-safety enforcement
@@ -373,7 +377,12 @@ def _download_models_if_enabled(config_path: str, allowlist: list[str] | None, c
             continue
         logger.info("Downloading model %s (%s) to %s", name, repo_id, target_dir)
         try:
-            snapshot_download(repo_id=repo_id, cache_dir=target_dir, local_dir_use_symlinks=False)
+            snapshot_download(
+                repo_id=repo_id,
+                cache_dir=target_dir,
+                local_dir_use_symlinks=False,
+                token=hf_token,
+            )
             downloaded.append(name)
         except Exception as exc:  # pragma: no cover - network/runtime failure
             raise SystemExit(f"Failed to download model {name} ({repo_id})") from exc

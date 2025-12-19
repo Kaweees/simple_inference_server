@@ -3,8 +3,14 @@
 import os
 from pathlib import Path
 
+import os
+
 import yaml
 from huggingface_hub import snapshot_download
+
+from app.utils.env import get_token
+
+hf_token = get_token("HF_TOKEN")
 
 CONFIG_PATH = os.getenv("MODEL_CONFIG", "configs/model_config.yaml")
 MODELS = os.getenv("MODELS")
@@ -35,6 +41,7 @@ def main() -> None:
             repo_id=repo_id,
             cache_dir=target_dir,
             local_dir_use_symlinks=False,
+            token=hf_token,
         )
         downloaded.add(name)
 
