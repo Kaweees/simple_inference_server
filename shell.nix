@@ -8,13 +8,13 @@ pkgs.mkShell {
     uv # Python package manager
     nixfmt # Nix formatter
     just # Just
+    zlib
   ];
 
   # Shell hook to set up environment
   shellHook = ''
     export TMPDIR=/tmp
     export UV_PYTHON="${pkgs.python313}/bin/python"
-    export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH"
-    just install
+    export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.zlib}/lib:$LD_LIBRARY_PATH"
   '';
 }
