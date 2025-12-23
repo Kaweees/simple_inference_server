@@ -187,7 +187,6 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
         raise SystemExit(1) from exc
 
     _enforce_thread_safety(registry)
-    _validate_ffmpeg_for_audio(registry)
 
     batching_service, chat_batching_service, batch_cfg = _init_batching(registry)
 
@@ -333,18 +332,6 @@ def _enforce_thread_safety(registry: ModelRegistry) -> None:
                     "workers": workers,
                 },
             )
-
-
-def _validate_ffmpeg_for_audio(registry: ModelRegistry) -> None:
-    """Ensure ffmpeg is available when audio/Whisper models are loaded."""
-
-    has_audio_model = any("audio-transcription" in getattr(m, "capabilities", []) for m in registry.models.values())
-    if not has_audio_model:
-        return
-    if shutil.which("ffmpeg") is None:
-        raise SystemExit(
-            "ffmpeg not found on PATH. Whisper/audio models require ffmpeg for decoding. Install ffmpeg and restart."
-        )
 
 
 def _download_models_if_enabled(config_path: str, allowlist: list[str] | None, cache_dir: str | None) -> None:

@@ -129,6 +129,22 @@ class SpeechModel(Protocol):
     ) -> SpeechResult: ...
 
 
+@runtime_checkable
+class TTSModel(Protocol):
+    name: str
+    device: str | torch.device
+    capabilities: list[str]
+    sr: int  # Sample rate
+
+    def generate(
+        self,
+        text: str,
+        *,
+        audio_prompt_path: str | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> Any: ...  # Returns audio tensor/array
+
+
 # TODO: future extension points for rerank and intent models. These are not used
 # yet but provide a clear contract so that future handlers can plug into the
 # server with the same style as EmbeddingModel / ChatModel / SpeechModel.
