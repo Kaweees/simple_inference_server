@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     max_batch_size: int = 32
     max_text_chars: int = 20000
     max_new_tokens: int = 512
-    max_audio_bytes: int = 25 * 1024 * 1024  # 25MB
+    max_audio_bytes: int = 200 * 1024 * 1024  # 200MB
 
     # -------------------------------------------------------------------------
     # Audio/Whisper settings

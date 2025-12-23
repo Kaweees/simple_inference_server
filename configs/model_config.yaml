@@ -98,3 +98,5 @@ models:
     handler: "app.models.whisper.WhisperASR"
   - hf_repo_id: "openai/whisper-tiny.en"
     handler: "app.models.whisper.WhisperASR"
+  - hf_repo_id: "ResembleAI/chatterbox-turbo"
+    handler: "app.models.chatterbox_tts.ChatterboxTTS"
