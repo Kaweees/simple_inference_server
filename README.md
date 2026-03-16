@@ -72,7 +72,13 @@ curl -X POST http://localhost:8000/v1/audio/transcriptions \
 | `MAX_CONCURRENT` | `4` | Max concurrent model forward passes |
 | `MAX_QUEUE_SIZE` | `64` | Request queue capacity |
 
-Copy `env` to `.env` for local configuration. See [Configuration Reference](docs/configuration.md) for all options.
+Set up a `.env` file for local configuration:
+
+```bash
+cp example.env .env
+```
+
+See [Configuration Reference](docs/configuration.md) for all options.
 
 ## Documentation
 
