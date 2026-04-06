@@ -16,7 +16,7 @@ dependencies = [
   "torch",
   "torchvision",
   "torchaudio",
-  "transformers>=4.57.3",
+  "transformers>=5.5.0",
   "accelerate>=1.12.0",
   "huggingface-hub>=0.36.0",
   "prometheus-client>=0.23.1",
@@ -24,8 +24,7 @@ dependencies = [
   "python-dotenv>=1.2.1",
   "pillow>=12.0.0",
   "python-multipart>=0.0.21",
-  "httpx>=0.28.1",
-  "xxhash>=3.5.0"
+  "httpx>=0.28.1"
 ]
 
 [project.optional-dependencies]
