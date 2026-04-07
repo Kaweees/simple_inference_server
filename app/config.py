@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     chat_batch_allow_vision: bool = False
     chat_batch_prompt_bucketing: bool = False
     chat_batch_prompt_bucket_size_tokens: int = 256
-    chat_max_prompt_tokens: int = 4096
+    chat_max_prompt_tokens: int = 131072
     chat_max_new_tokens: int = 2048
 
     # Chat batch queue management
