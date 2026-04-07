@@ -30,6 +30,8 @@ dependencies = [
   "sympy>=1.13.1,<1.14",
   "gguf>=0.10.0",
   "polarquant>=0.6.0",
+  "nvidia-modelopt>=0.42.0",
+  "compressed-tensors>=0.13.0",
 ]
 
 [project.optional-dependencies]
