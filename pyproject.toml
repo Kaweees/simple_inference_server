@@ -29,6 +29,7 @@ dependencies = [
   "turboquant-kv[hf]",
   "sympy>=1.13.1,<1.14",
   "gguf>=0.10.0",
+  "polarquant>=0.6.0",
 ]
 
 [project.optional-dependencies]
