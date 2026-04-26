@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     models: str = ""  # Comma-separated list of model IDs to load
     model_device: str = "auto"  # cpu, cuda, cuda:<idx>, mps, auto
     auto_download_models: bool = True
-    hf_home: str = ""  # Falls back to ./models if not set
+    hf_home: str = ""  # Falls back to /models if not set
 
     # -------------------------------------------------------------------------
     # Global concurrency settings

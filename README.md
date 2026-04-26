@@ -37,7 +37,11 @@ Built for edge AI scenarios where you need multiple models running concurrently 
 # 1. Install dependencies
 uv sync
 
-# 2. Run the server (models download automatically)
+# 2. Set up model directory
+
+sudo mkdir -p /models && sudo chown -R $USER:$USER /models
+
+# 3. Run the server (models download automatically)
 MODELS=BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507 uv run python scripts/run_dev.py
 
 # Or with Whisper for audio:

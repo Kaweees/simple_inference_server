@@ -9,8 +9,8 @@ from app.model_config import load_model_config
 
 CONFIG_PATH = os.getenv("MODEL_CONFIG_PATH") or os.getenv("MODEL_CONFIG") or "models.yaml"
 MODELS = os.getenv("MODELS")
-# Hard lock cache to repo-local models directory to ensure Docker COPY works.
-DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "models"
+# Default to /models so downloads land in a stable, well-known location.
+DEFAULT_CACHE_DIR = Path(os.getenv("HF_HOME") or "/models")
 
 
 def main() -> None:

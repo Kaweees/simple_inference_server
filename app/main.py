@@ -110,8 +110,8 @@ async def _startup_in_background() -> tuple[ModelRegistry, BatchingService, Chat
 
 def _load_model_config() -> tuple[str, list[str] | None, str | None]:
     """Load base configuration paths and allowlists."""
-    # Prefer local ./models; if HF_HOME already set, keep it for fallback use
-    hf_home = settings.hf_home or str(Path.cwd() / "models")
+    # Default download target is /models; HF_HOME env override wins.
+    hf_home = settings.hf_home or "/models"
     os.environ.setdefault("HF_HOME", hf_home)
 
     config_path = settings.model_config_path
@@ -362,7 +362,7 @@ def _download_models_if_enabled(config_path: str, allowlist: list[str] | None, c
     except Exception as exc:  # pragma: no cover - startup guardrail
         raise SystemExit(f"Failed to read model config at {config_path}") from exc
 
-    target_dir = Path(cache_dir) if cache_dir else Path.cwd() / "models"
+    target_dir = Path(cache_dir) if cache_dir else Path("/models")
     target_dir.mkdir(parents=True, exist_ok=True)
 
     requested = set(allowlist) if allowlist else None
